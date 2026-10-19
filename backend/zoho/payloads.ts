@@ -348,7 +348,7 @@ export function buildPasscodePayload(input: {
   autoLockSeconds?: number;
   maxAgeDays?: number;
   history?: number;
-  scope?: number; // scope_for_passcode: -1 none, 0 device, 1 work profile, 2/3 reserved
+  scope?: number; // scope_for_passcode: 0 device-wide, 1 work profile (guide: only these two)
   gracePeriodMinutes?: number; // minutes before the policy becomes enforced
   allowFingerprint?: number; // 0 restrict / 1 allow
   allowFaceUnlock?: boolean;
@@ -369,14 +369,18 @@ export function buildPasscodePayload(input: {
     allow_iris_scan: input.allowIrisScan ?? true,
     allow_one_lock: input.allowOneLock ?? true,
   };
-  if (![-1, 0, 1, 2, 3].includes(p.scope_for_passcode)) fail("VALIDATION_FAILED", "scope must be -1, 0, 1, 2, or 3");
+  if (![0, 1].includes(p.scope_for_passcode)) fail("VALIDATION_FAILED", "scope must be 0 (device) or 1 (work profile)");
   if (![1, 2, 3, 4, 5].includes(p.passcode_type)) fail("VALIDATION_FAILED", "passcodeType must be 1–5");
-  if (p.min_passcode_length < 4 || p.min_passcode_length > 16) fail("VALIDATION_FAILED", "minLength must be 4–16");
+  if (p.min_passcode_length !== -1 && (p.min_passcode_length < 4 || p.min_passcode_length > 16)) {
+    fail("VALIDATION_FAILED", "minLength must be -1 (none) or 4–16");
+  }
   if (p.max_failed_attempts !== -1 && (p.max_failed_attempts < 4 || p.max_failed_attempts > 16)) {
     fail("VALIDATION_FAILED", "maxFailedAttempts must be -1 or 4–16");
   }
   if (p.auto_lock_idle_for < 5 || p.auto_lock_idle_for > 1800) fail("VALIDATION_FAILED", "autoLockSeconds must be 5–1800");
   if (p.grace_period < 1 || p.grace_period > 1000) fail("VALIDATION_FAILED", "gracePeriodMinutes must be 1–1000");
+  if (p.max_passcode_age < 0 || p.max_passcode_age > 1000) fail("VALIDATION_FAILED", "maxAgeDays must be 0–1000");
+  if (p.no_of_passcode_maintained < 0 || p.no_of_passcode_maintained > 100) fail("VALIDATION_FAILED", "history must be 0–100");
   if (![0, 1].includes(p.allow_fingerprint)) fail("VALIDATION_FAILED", "allowFingerprint must be 0 or 1");
   return p;
 }

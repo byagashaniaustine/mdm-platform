@@ -112,6 +112,18 @@ Deno.test("passcode payload rejects out-of-range grace period and bad scope", ()
   assert.throws(() => buildPasscodePayload({ gracePeriodMinutes: 0 }));
   assert.throws(() => buildPasscodePayload({ scope: 99 }));
   assert.throws(() => buildPasscodePayload({ allowFingerprint: 2 }));
+  // Guide: scope is 0 (device) or 1 (work profile) only; -1/2/3 are rejected by Zoho.
+  assert.throws(() => buildPasscodePayload({ scope: -1 }));
+  assert.throws(() => buildPasscodePayload({ scope: 2 }));
+  // Guide: min_passcode_length accepts -1 (none) or 4–16.
+  assert.equal(buildPasscodePayload({ minLength: -1 }).min_passcode_length, -1);
+  assert.throws(() => buildPasscodePayload({ minLength: 3 }));
+  assert.throws(() => buildPasscodePayload({ minLength: 17 }));
+  // Guide: max_passcode_age 0–1000, no_of_passcode_maintained 0–100.
+  assert.throws(() => buildPasscodePayload({ maxAgeDays: 1001 }));
+  assert.throws(() => buildPasscodePayload({ maxAgeDays: -1 }));
+  assert.throws(() => buildPasscodePayload({ history: 101 }));
+  assert.throws(() => buildPasscodePayload({ history: -1 }));
 });
 
 Deno.test("secrets round-trip through AES-GCM and never appear in ciphertext", async () => {
@@ -220,7 +232,10 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
       assert.equal(actionAppliesTo(a, unsup), false, `${a} unsupervised`);
       assert.equal(actionAppliesTo(a, unknown), true, `${a} unknown is let through`);
     }
-    for (const a of ["lock", "complete_wipe", "reset_passcode", "scan"]) assert.equal(actionAppliesTo(a, unsup), true, a);
+    for (const a of ["lock", "complete_wipe", "clear_passcode", "scan"]) assert.equal(actionAppliesTo(a, unsup), true, a);
+    // Apple MDM can't set a passcode on iOS (only clear it), supervised or not.
+    assert.equal(actionAppliesTo("reset_passcode", unsup), false);
+    assert.equal(actionAppliesTo("reset_passcode", { ...unsup, is_supervised: true }), false);
     assert.equal(actionAppliesTo("pause_kiosk", sup), false);
     // Android unaffected by the iOS rule
     assert.equal(actionAppliesTo("enable_lost_mode", { platform: "android", is_knox: false, is_supervised: false }), true);
