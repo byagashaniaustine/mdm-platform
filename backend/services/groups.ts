@@ -120,12 +120,15 @@ export async function resetPasscodeOnGroup(
   idem: string | null,
 ) {
   const g = await getGroup(s.enterpriseId, groupId);
-  const rows = await run<{ device_id: string }[]>(
-    db().from("group_devices").select("device_id, devices!inner(is_removed)")
+  const rows = await run<{ device_id: string; devices: { platform: string } | { platform: string }[] }[]>(
+    db().from("group_devices").select("device_id, devices!inner(is_removed, platform)")
       .eq("group_id", groupId).eq("devices.is_removed", false),
   );
-  const deviceIds = rows.map((r) => r.device_id);
-  if (!deviceIds.length) fail("CONFLICT", `Group "${g.name}" has no enrolled devices`);
+  if (!rows.length) fail("CONFLICT", `Group "${g.name}" has no enrolled devices`);
+  // Apple doesn't let an MDM set a passcode on iPhone/iPad, so those are left out.
+  const platformOf = (r: (typeof rows)[number]) => (Array.isArray(r.devices) ? r.devices[0]?.platform : r.devices?.platform);
+  const deviceIds = rows.filter((r) => platformOf(r) !== "ios").map((r) => r.device_id);
+  if (!deviceIds.length) fail("VALIDATION_FAILED", `Every device in "${g.name}" is an iPhone or iPad, and Apple doesn't allow setting a passcode on those remotely. Use Clear passcode on each device instead.`);
   // Two-step: nothing is sent until the admin confirms by typing the group name.
   return await requestGroupPasscodeReset(s, g, deviceIds, {
     passcode: input.passcode,

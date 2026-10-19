@@ -254,7 +254,7 @@ export async function groupDetailView(el, ctx, id) {
     const emailUser = h("input", { type: "checkbox", checked: true });
     const emailAdmin = h("input", { type: "checkbox" });
     modal(`Set passcode on all devices in ${g.name}`, h("div", { class: "stack" },
-      h("p", { class: "muted small" }, `Overwrites the lock-screen passcode on every enrolled member device (${g.devices.length}). Use this when a passcode profile isn't enough — e.g. the device has no passcode yet.`),
+      h("p", { class: "muted small" }, `Overwrites the lock-screen passcode on every enrolled member device (${g.devices.length}). Use this when a passcode profile isn't enough — e.g. the device has no passcode yet. iPhones and iPads are skipped: Apple doesn't allow setting a passcode remotely.`),
       field("New passcode", pw),
       h("label", { class: "pick" }, emailUser, h("span", {}, "Email the passcode to the device user")),
       h("label", { class: "pick" }, emailAdmin, h("span", {}, "Email the passcode to me")),

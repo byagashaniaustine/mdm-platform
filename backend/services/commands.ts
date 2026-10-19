@@ -63,7 +63,8 @@ export const DEVICE_ACTIONS: Record<string, ActionDef> = {
     confirm: true,
     params: ["passcode", "email_sent_to_user", "email_sent_to_admin"],
     history: /pass/i,
-    platforms: ["ios", "android", "macos"],
+    // Not iPhone/iPad: Apple's MDM protocol can't set a passcode on iOS, only clear it.
+    platforms: ["android", "macos"],
   },
   clear_passcode: { label: "Clear passcode", minRole: "admin", confirm: true, params: [], history: /pass/i, platforms: ["ios", "android"] },
   corporate_wipe: { label: "Corporate wipe (work data only)", minRole: "owner", confirm: true, params: [], history: /wipe|corporate/i, platforms: ["ios", "android", "macos"] },
@@ -215,6 +216,9 @@ export async function requestCommand(session: Session, input: {
       if (device.platform === "android" && def.knoxOnlyAndroid && !device.is_knox) {
         fail("VALIDATION_FAILED", `${def.label} needs a Samsung Knox device; ${name} isn't one`);
       }
+      if (device.platform === "ios" && input.action === "reset_passcode") {
+        fail("VALIDATION_FAILED", `iPhones can't be given a new passcode remotely; Apple only allows clearing it. Use Clear passcode on ${name}, then the user sets a new one (a passcode profile on its group makes that required).`);
+      }
       if (device.platform === "ios" && def.supervisedOnlyIos) {
         fail("VALIDATION_FAILED", `${def.label} needs a supervised iPhone; ${name} isn't supervised. Enrol it through Apple Business Manager to supervise it.`);
       }
@@ -328,7 +332,8 @@ async function fanOutGroupPasscode(session: Session, parent: EventRow) {
   });
   const devices = await getDevices(session.enterpriseId, device_ids);
   const out: EventRow[] = [];
-  for (const device of devices.filter((d) => !d.is_removed)) {
+  // iPhones can't take a new passcode (Apple MDM limit); skip them rather than queue sure failures.
+  for (const device of devices.filter((d) => !d.is_removed && actionAppliesTo("reset_passcode", d))) {
     const { event, duplicate } = await createEvent({
       enterpriseId: session.enterpriseId,
       adminId: session.adminId,
@@ -363,7 +368,7 @@ for (const action of Object.keys(DEVICE_ACTIONS)) {
       // Zoho's 412 CMD0001 "Command not applicable for Device": say what usually causes it.
       const err = toAppError(e);
       if (err.code === "ZOHO_BAD_REQUEST" && /not applicable|CMD0001/i.test(`${err.message} ${JSON.stringify(err.details ?? "")}`)) {
-        fail("ZOHO_BAD_REQUEST", `Zoho says ${def.label.toLowerCase()} doesn't apply to ${device.device_name ?? "this device"}. ${NOT_APPLICABLE_HINT[action] ?? "The phone's platform or management mode doesn't support it."}`, err.details);
+        fail("ZOHO_BAD_REQUEST", `Zoho says ${def.label.toLowerCase()} doesn't apply to ${device.device_name ?? "this device"}. ${NOT_APPLICABLE_HINT[`${action}:${device.platform}`] ?? NOT_APPLICABLE_HINT[action] ?? "The phone's platform or management mode doesn't support it."}`, err.details);
       }
       throw e;
     }
@@ -373,6 +378,8 @@ for (const action of Object.keys(DEVICE_ACTIONS)) {
 
 /** Most common reasons Zoho answers CMD0001 for each command (shown to the admin). */
 const NOT_APPLICABLE_HINT: Record<string, string> = {
+  "reset_passcode:ios": "Apple doesn't let an MDM set a passcode on iPhone or iPad. Use Clear passcode, then the user sets a new one.",
+  "clear_passcode:ios": "Zoho needs the iPhone's unlock token, which it only gets if the phone had a passcode when it enrolled. Re-enrol it with a passcode set, or erase it with Complete wipe.",
   reset_passcode: "On Android it only works on company-owned phones fully managed by Zoho (not personal or work-profile phones), and the new passcode must meet the passcode policy of the phone's groups (length and type).",
   clear_passcode: "Android 7 and later don't allow an MDM to clear the passcode on most phones. Use Reset passcode to set a new one instead.",
   pause_kiosk: "The phone isn't in kiosk mode right now.",
