@@ -1,4 +1,4 @@
-// Outbound email for OTP codes and wipe confirmations.
+// Outbound email for sign-in codes and critical alerts.
 // development: printed to the console. production: Zoho ZeptoMail (recommended) or Resend.
 import { getConfig } from "../config.ts";
 import { appError } from "../lib/errors.ts";
@@ -53,33 +53,5 @@ export function otpMail(to: string, code: string, minutes: number): Mail {
     to,
     subject: `Your MDM Console sign-in code: ${code}`,
     text: `Your sign-in code is ${code}.\nIt expires in ${minutes} minutes. If you did not request it, ignore this email.`,
-  };
-}
-
-/**
- * Second step of a destructive action, sent to the requesting admin's sign-in email.
- * `target` describes exactly what will be affected; `typeThis` is what they must type
- * in the console besides the code (a serial-number tail or the group name).
- */
-export function confirmMail(
-  to: string,
-  code: string,
-  c: { action: string; targetTitle: string; target: string[]; typeThis: string; typeWhat: string; minutes: number },
-): Mail {
-  return {
-    to,
-    subject: `Confirm ${c.action} on ${c.targetTitle}`,
-    text: [
-      `You asked to run: ${c.action}`,
-      "",
-      ...c.target,
-      "",
-      `Confirmation code: ${code}`,
-      `In the console, enter this code and type ${c.typeWhat}: ${c.typeThis}`,
-      `The code expires in ${c.minutes} minutes and works only for you.`,
-      "",
-      "If you did not ask for this, ignore this email. Nothing happens and the request is cancelled when the code expires.",
-      "Then change your password: someone may be signed in as you.",
-    ].join("\n"),
   };
 }

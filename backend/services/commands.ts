@@ -1,12 +1,10 @@
 // Device commands: catalogue, role rules, two-step confirmation and acknowledgement tracking.
 import { getConfig } from "../config.ts";
 import { db } from "../lib/db.ts";
-import { decryptSecret, encryptSecret, randomDigits, safeEqual } from "../lib/crypto.ts";
-import { fail } from "../lib/errors.ts";
+import { decryptSecret, encryptSecret } from "../lib/crypto.ts";
+import { fail, toAppError } from "../lib/errors.ts";
 import { getCommandHistory, runDeviceAction, runKnoxDeviceAction } from "../zoho/api.ts";
 import type { Role, Session } from "./auth.ts";
-import { hashConfirmCode } from "./auth.ts";
-import { confirmMail, sendMail } from "./mail.ts";
 import {
   createEvent,
   type EventRow,
@@ -23,7 +21,7 @@ export type Platform = "ios" | "android" | "macos" | "windows" | "chrome";
 type ActionDef = {
   label: string;
   minRole: Role;
-  confirm: boolean; // two-step: code emailed to the admin's sign-in email + typed serial tail
+  confirm: boolean; // two-step: review dialog, then the admin types the serial tail
   params: readonly string[]; // allowed body fields for Zoho
   history: RegExp; // how the command shows up in Zoho command history
   // Platforms where the standard /actions/ endpoint works. macOS is included only for the
@@ -32,18 +30,21 @@ type ActionDef = {
   // true → on Samsung Knox (device.is_knox) route via /knox_actions/ instead of /actions/.
   // These are the commands standard Android MDM doesn't surface (shutdown, restart).
   knoxOnlyAndroid?: boolean;
+  // true → on iPhone/iPad Apple only accepts it from a supervised device (Apple Business
+  // Manager / Configurator). Unsupervised iPhones reject it, so we don't offer it there.
+  supervisedOnlyIos?: boolean;
 };
 
 // Action names from the guide: POST /devices/{id}/actions/{action_name}
 export const DEVICE_ACTIONS: Record<string, ActionDef> = {
   scan: { label: "Scan / refresh inventory", minRole: "admin", confirm: false, params: [], history: /scan/i, platforms: ["ios", "android", "macos", "windows", "chrome"] },
   lock: { label: "Lock device", minRole: "admin", confirm: false, params: ["lock_message"], history: /lock/i, platforms: ["ios", "android", "macos"] },
-  remote_alarm: { label: "Ring alarm", minRole: "admin", confirm: false, params: [], history: /alarm/i, platforms: ["ios", "android"] },
-  fetch_location: { label: "Fetch location", minRole: "admin", confirm: false, params: [], history: /locat/i, platforms: ["ios", "android"] },
+  remote_alarm: { label: "Ring alarm", minRole: "admin", confirm: false, params: [], history: /alarm/i, platforms: ["ios", "android"], supervisedOnlyIos: true },
+  fetch_location: { label: "Fetch location", minRole: "admin", confirm: false, params: [], history: /locat/i, platforms: ["ios", "android"], supervisedOnlyIos: true },
   // Shutdown / restart: Apple's MDM protocol exposes these on supervised iOS; macOS does not.
   // On Android the standard protocol has no shutdown/restart — only Samsung Knox does, via /knox_actions/.
-  restart: { label: "Restart", minRole: "admin", confirm: false, params: [], history: /restart|reboot/i, platforms: ["ios", "android"], knoxOnlyAndroid: true },
-  shutdown: { label: "Shut down", minRole: "admin", confirm: false, params: [], history: /shut/i, platforms: ["ios", "android"], knoxOnlyAndroid: true },
+  restart: { label: "Restart", minRole: "admin", confirm: false, params: [], history: /restart|reboot/i, platforms: ["ios", "android"], knoxOnlyAndroid: true, supervisedOnlyIos: true },
+  shutdown: { label: "Shut down", minRole: "admin", confirm: false, params: [], history: /shut/i, platforms: ["ios", "android"], knoxOnlyAndroid: true, supervisedOnlyIos: true },
   enable_lost_mode: {
     label: "Enable lost mode",
     minRole: "admin",
@@ -51,8 +52,9 @@ export const DEVICE_ACTIONS: Record<string, ActionDef> = {
     params: ["lock_message", "phone_number", "send_email_to_user", "audit_message"],
     history: /lost/i,
     platforms: ["ios", "android"],
+    supervisedOnlyIos: true,
   },
-  disable_lost_mode: { label: "Disable lost mode", minRole: "admin", confirm: false, params: [], history: /lost/i, platforms: ["ios", "android"] },
+  disable_lost_mode: { label: "Disable lost mode", minRole: "admin", confirm: false, params: [], history: /lost/i, platforms: ["ios", "android"], supervisedOnlyIos: true },
   pause_kiosk: { label: "Pause kiosk", minRole: "admin", confirm: false, params: ["re_enter_time"], history: /kiosk/i, platforms: ["android"] },
   re_apply_kiosk: { label: "Re-apply kiosk", minRole: "admin", confirm: false, params: [], history: /kiosk/i, platforms: ["android"] },
   reset_passcode: {
@@ -76,13 +78,15 @@ export const DEVICE_ACTIONS: Record<string, ActionDef> = {
 };
 
 /** Server-side guard: is this action expected to work for this device? Mirrors the UI filter. */
-export function actionAppliesTo(action: string, device: Pick<DeviceRow, "platform" | "is_knox">): boolean {
+export function actionAppliesTo(action: string, device: Pick<DeviceRow, "platform" | "is_knox" | "is_supervised">): boolean {
   const def = DEVICE_ACTIONS[action];
   if (!def) return false;
   const p = device.platform as Platform;
   if (!def.platforms.includes(p)) return false;
   // Android shutdown/restart only on Samsung Knox.
   if (p === "android" && def.knoxOnlyAndroid && !device.is_knox) return false;
+  // Unknown supervision (null, not synced yet) is let through; only a known "false" blocks.
+  if (p === "ios" && def.supervisedOnlyIos && device.is_supervised === false) return false;
   return true;
 }
 
@@ -188,6 +192,13 @@ export async function requestCommand(session: Session, input: {
   if (def.confirm && input.deviceIds.length !== 1) {
     fail("VALIDATION_FAILED", `${def.label} can only target one device at a time`);
   }
+  // The guide marks `passcode` as required for reset_passcode; without it Zoho rejects the command.
+  if (input.action === "reset_passcode") {
+    const pc = input.params.passcode;
+    if (typeof pc !== "string" || pc.length < 4 || pc.length > 16) {
+      fail("VALIDATION_FAILED", "Enter the new passcode (4–16 characters). To remove the passcode instead, use Clear passcode.");
+    }
+  }
   const params = await sealParams(pickParams(def, input.params));
   const devices = await getDevices(session.enterpriseId, input.deviceIds);
   const cfg = getConfig();
@@ -204,6 +215,9 @@ export async function requestCommand(session: Session, input: {
       if (device.platform === "android" && def.knoxOnlyAndroid && !device.is_knox) {
         fail("VALIDATION_FAILED", `${def.label} needs a Samsung Knox device; ${name} isn't one`);
       }
+      if (device.platform === "ios" && def.supervisedOnlyIos) {
+        fail("VALIDATION_FAILED", `${def.label} needs a supervised iPhone; ${name} isn't supervised. Enrol it through Apple Business Manager to supervise it.`);
+      }
       fail("VALIDATION_FAILED", `${def.label} isn't supported on ${device.platform} devices (${name})`);
     }
     const base = {
@@ -218,25 +232,12 @@ export async function requestCommand(session: Session, input: {
     };
 
     if (def.confirm) {
-      const code = randomDigits(6);
       const { event, duplicate } = await createEvent({
         ...base,
         state: "awaiting_confirmation",
-        confirmCodeHash: await hashConfirmCode(`${session.adminId}:${device.id}`, code),
         confirmExpiresAt: new Date(Date.now() + cfg.confirmTtlMinutes * 60_000),
       });
-      if (!duplicate) {
-        await updateEvent(event.id, { locked_until: null });
-        const d = await describeDevice(device);
-        await sendMail(confirmMail(session.email, code, {
-          action: def.label,
-          targetTitle: `${d.name} (…${d.tag})`,
-          target: d.lines,
-          typeThis: d.tag,
-          typeWhat: `the last 4 characters of the ${d.tag_source}`,
-          minutes: cfg.confirmTtlMinutes,
-        }));
-      }
+      if (!duplicate) await updateEvent(event.id, { locked_until: null });
       results.push(event);
       continue;
     }
@@ -248,14 +249,12 @@ export async function requestCommand(session: Session, input: {
 }
 
 /**
- * Group-wide passcode reset (Group page). One emailed code for the whole group; the admin also
- * types the group name. Per-device commands are created only after confirmation.
+ * Group-wide passcode reset (Group page). The admin confirms by typing the group name. Per-device commands are created only after confirmation.
  */
 export async function requestGroupPasscodeReset(session: Session, group: GroupRow, deviceIds: string[], params: Record<string, unknown>, idempotencyKey: string | null) {
   if (!roleAtLeast(session.role, DEVICE_ACTIONS.reset_passcode.minRole)) fail("AUTH_FORBIDDEN");
   const sealed = await sealParams(pickParams(DEVICE_ACTIONS.reset_passcode, params));
   const cfg = getConfig();
-  const code = randomDigits(6);
   const { event, duplicate } = await createEvent({
     enterpriseId: session.enterpriseId,
     adminId: session.adminId,
@@ -265,25 +264,14 @@ export async function requestGroupPasscodeReset(session: Session, group: GroupRo
     groupId: group.id,
     idempotencyKey,
     state: "awaiting_confirmation",
-    confirmCodeHash: await hashConfirmCode(`${session.adminId}:${group.id}`, code),
     confirmExpiresAt: new Date(Date.now() + cfg.confirmTtlMinutes * 60_000),
   });
-  if (!duplicate) {
-    await updateEvent(event.id, { locked_until: null });
-    await sendMail(confirmMail(session.email, code, {
-      action: "Reset passcode on every device in a group",
-      targetTitle: `group ${group.name}`,
-      target: [`Group: ${group.name}`, `Devices affected: ${deviceIds.length}`],
-      typeThis: group.name,
-      typeWhat: "the group name",
-      minutes: cfg.confirmTtlMinutes,
-    }));
-  }
+  if (!duplicate) await updateEvent(event.id, { locked_until: null });
   return event;
 }
 
-/** Step 2. The requester enters the emailed code and types the serial tail (or group name). */
-export async function confirmCommand(session: Session, eventId: string, input: { code: string; typed: string }) {
+/** Step 2. The requester types the serial tail (or group name) shown in the dialog. */
+export async function confirmCommand(session: Session, eventId: string, input: { typed: string }) {
   const ev = (await db().from("events").select("*").eq("id", eventId).eq("enterprise_id", session.enterpriseId)
     .maybeSingle()).data as EventRow | null;
   const isGroup = ev?.category === "group" && ev.action === "group.reset_passcode";
@@ -295,13 +283,11 @@ export async function confirmCommand(session: Session, eventId: string, input: {
     fail("COMMAND_CONFIRMATION_EXPIRED");
   }
   const target = await confirmationTarget(session.enterpriseId, ev);
-  const subjectId = isGroup ? ev.group_id! : ev.device_id!;
   const tries = Number((ev.response as { confirm_tries?: number } | null)?.confirm_tries ?? 0) + 1;
   const norm = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
   const nameOk = norm(input.typed) === norm(target.tag);
-  const codeOk = safeEqual(await hashConfirmCode(`${session.adminId}:${subjectId}`, input.code), ev.confirm_code_hash ?? "");
 
-  if (!nameOk || !codeOk) {
+  if (!nameOk) {
     const cancel = tries >= 5;
     await updateEvent(ev.id, {
       response: { ...(ev.response ?? {}), confirm_tries: tries },
@@ -370,21 +356,44 @@ for (const action of Object.keys(DEVICE_ACTIONS)) {
     // Samsung Knox devices get shutdown/restart via /knox_actions/ — the standard /actions/ endpoint returns COM0007.
     const useKnox = device.platform === "android" && !!device.is_knox && !!def.knoxOnlyAndroid;
     const send = useKnox ? runKnoxDeviceAction : runDeviceAction;
-    const zoho = await send(ev.enterprise_id, device.zoho_device_id, action, params);
+    let zoho;
+    try {
+      zoho = await send(ev.enterprise_id, device.zoho_device_id, action, params);
+    } catch (e) {
+      // Zoho's 412 CMD0001 "Command not applicable for Device": say what usually causes it.
+      const err = toAppError(e);
+      if (err.code === "ZOHO_BAD_REQUEST" && /not applicable|CMD0001/i.test(`${err.message} ${JSON.stringify(err.details ?? "")}`)) {
+        fail("ZOHO_BAD_REQUEST", `Zoho says ${def.label.toLowerCase()} doesn't apply to ${device.device_name ?? "this device"}. ${NOT_APPLICABLE_HINT[action] ?? "The phone's platform or management mode doesn't support it."}`, err.details);
+      }
+      throw e;
+    }
     return { state: "sent", response: { zoho_send: zoho ?? { status: "accepted" }, endpoint: useKnox ? "knox" : "standard" } };
   });
 }
 
+/** Most common reasons Zoho answers CMD0001 for each command (shown to the admin). */
+const NOT_APPLICABLE_HINT: Record<string, string> = {
+  reset_passcode: "On Android it only works on company-owned phones fully managed by Zoho (not personal or work-profile phones), and the new passcode must meet the passcode policy of the phone's groups (length and type).",
+  clear_passcode: "Android 7 and later don't allow an MDM to clear the passcode on most phones. Use Reset passcode to set a new one instead.",
+  pause_kiosk: "The phone isn't in kiosk mode right now.",
+  re_apply_kiosk: "The phone has no kiosk profile applied right now.",
+  enable_lost_mode: "Lost mode needs a company-owned phone (and, on iPhone, a supervised one).",
+  fetch_location: "Location needs the Zoho MDM app with location permission on the phone (and, on iPhone, a supervised device).",
+  restart: "Restart needs a Samsung Knox phone on Android or a supervised iPhone.",
+  shutdown: "Shut down needs a Samsung Knox phone on Android or a supervised iPhone.",
+};
+
 // The group event only carries the confirmation; confirmCommand() creates the per-device
 // commands. It never enters the queue, so this executor exists only to satisfy createEvent().
 registerExecutor("group.reset_passcode", () => {
-  fail("CONFLICT", "Group passcode resets run only after the emailed code is confirmed");
+  fail("CONFLICT", "Group passcode resets run only after they are confirmed");
 });
 
 // ------------------------------------------------------ acknowledgement poll
 type HistoryCommand = { command_name?: string; added_time?: number; command_status?: number; remarks?: string; command_life?: { status_description?: string; status_code?: number }[] };
 
-const MAX_POLLS = 40;
+const MAX_POLLS = 40; // fast polls (~13 h), then every 6 h
+const OFFLINE_WAIT_DAYS = 14;
 
 function classify(cmd: HistoryCommand): "succeeded" | "failed" | "acknowledged" {
   const life = cmd.command_life ?? [];
@@ -424,13 +433,18 @@ export async function pollCommandStatus(ev: EventRow): Promise<void> {
     if (outcome === "succeeded") await applyLocalEffects(ev, device.id);
     return;
   }
-  // Still waiting (device offline or command queued). Poll less often over time; stop after MAX_POLLS.
-  const waitMs = Math.min(60_000 * polls, 30 * 60_000);
+  // Still waiting: usually the phone is offline. Zoho keeps the command and the phone runs it
+  // when it reconnects, so keep checking: quickly at first, then every 6 hours for up to 14 days.
+  const ageMs = Date.now() - Date.parse(ev.sent_at ?? ev.action_time);
+  const givingUp = ageMs > OFFLINE_WAIT_DAYS * 86400_000;
+  const waitMs = polls < MAX_POLLS ? Math.min(60_000 * polls, 30 * 60_000) : 6 * 3600_000;
   await updateEvent(ev.id, {
     state: outcome === "acknowledged" ? "acknowledged" : "sent",
     response,
-    next_attempt_at: new Date(Date.now() + (polls >= MAX_POLLS ? 365 * 86400_000 : waitMs)).toISOString(),
-    error_message: polls >= MAX_POLLS ? "No final status from the device yet; check the device in Zoho." : null,
+    next_attempt_at: new Date(Date.now() + (givingUp ? 365 * 86400_000 : waitMs)).toISOString(),
+    error_message: givingUp
+      ? `The phone hasn't answered for ${OFFLINE_WAIT_DAYS} days. Zoho still holds the command; check the device in Zoho.`
+      : polls >= MAX_POLLS ? "Waiting for the phone to come online; checking every 6 hours." : null,
     locked_until: null,
   });
 }

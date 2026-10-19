@@ -22,6 +22,13 @@ function adminMode(d) {
   if (d.is_profileowner === true) {
     return { label: "work profile", tone: "info", hint: "Agent only controls the work-profile container. Device-wide restrictions won't apply." };
   }
+  if (d.platform === "ios") {
+    if (d.is_supervised === true) return { label: "supervised", tone: "ok", hint: "Full company control: lost mode, location, restart and supervised-only restrictions all work." };
+    if (d.is_supervised === false) {
+      return { label: "not supervised", tone: "warn", hint: "Apple limits unsupervised iPhones: lost mode, location, ring alarm and restart aren't available, and some restrictions are ignored. Enrol it through Apple Business Manager to supervise it." };
+    }
+    return { label: "supervision unknown", tone: "muted", hint: "Not reported by Zoho yet. Sync again after the iPhone checks in." };
+  }
   if (d.is_supervised === true) {
     return { label: "supervised", tone: "ok", hint: "Agent has device-wide authority. All profile restrictions should apply." };
   }
@@ -33,6 +40,24 @@ function adminMode(d) {
   }
   return null;
 }
+
+/**
+ * Commands to an offline phone are not lost: Zoho keeps them and the phone runs them the next
+ * time it connects (that includes lock and wipe). Say so before an admin sends one.
+ */
+function offlineBanner(d) {
+  if (d.is_removed || !d.last_contact_at) return null;
+  const hours = (Date.now() - Date.parse(d.last_contact_at)) / 3600_000;
+  if (hours < 1) return null;
+  const stale = hours > STALE_HOURS;
+  return h("div", { class: `banner ${stale ? "banner-warn" : "banner-info"}` }, icon(stale ? "alerts" : "sync"), h("div", {},
+    h("strong", {}, `${stale ? "Offline" : "Last checked in"} ${ago(d.last_contact_at)}. `),
+    "Commands you send now wait in Zoho and run as soon as the phone connects to the internet. ",
+    "They show as \u201cwaiting for phone\u201d below until then.",
+    stale ? " If it never reconnects (lost, switched off, SIM removed), a wipe will also wait; check Locations for its last known position." : ""));
+}
+
+const STATE_TEXT = { sent: "waiting for phone", acknowledged: "phone received it", requested: "queued", awaiting_confirmation: "needs confirmation" };
 
 // ------------------------------------------------------------------ list
 export async function devicesView(el, ctx, params) {
@@ -141,6 +166,7 @@ export async function deviceDetailView(el, ctx, id) {
     if (!a.platforms?.length) return true;
     if (!a.platforms.includes(d.platform)) return false;
     if (d.platform === "android" && a.knoxOnlyAndroid && !d.is_knox) return false;
+    if (d.platform === "ios" && a.supervisedOnlyIos && d.is_supervised === false) return false;
     return true;
   };
   const allowed = acts.filter((a) => ctx.can(a.minRole) && supports(a));
@@ -189,6 +215,13 @@ export async function deviceDetailView(el, ctx, id) {
     alerts.length
       ? h("div", { class: "banner banner-warn" }, icon("alerts"), h("div", {}, h("strong", {}, `${alerts.length} open alert(s): `), alerts.map((a) => a.title).join(" · "), " ", h("a", { href: "#/alerts" }, "Review")))
       : null,
+    offlineBanner(d),
+    d.platform === "ios" && d.is_supervised === false
+      ? h("div", { class: "banner banner-info" }, icon("shield"), h("div", {},
+        h("strong", {}, "Not supervised. "),
+        "Apple doesn't allow lost mode, location, ring alarm, restart or shut down on unsupervised iPhones, so they're hidden. ",
+        "Lock, passcode and wipe still work. To get full control, enrol the iPhone through Apple Business Manager."))
+      : null,
     h("div", { class: "split" },
       h("div", {},
         safe.length ? h("section", { class: "card" },
@@ -218,7 +251,7 @@ export async function deviceDetailView(el, ctx, id) {
         h("section", { class: "card" },
           h("div", { class: "card-head" }, h("h2", {}, "Recent events"), h("a", { href: "#/activity" }, "All activity")),
           d.events.length
-            ? h("ul", { class: "feed" }, d.events.slice(0, 15).map((e) => h("li", {}, badge(e.state), h("span", { class: "feed-action" }, e.action.replace(/_/g, " ")), e.error_message ? h("span", { class: "muted small" }, e.error_message) : null, h("span", { class: "muted feed-time" }, ago(e.action_time)))))
+            ? h("ul", { class: "feed" }, d.events.slice(0, 15).map((e) => h("li", {}, STATE_TEXT[e.state] ? badge(STATE_TEXT[e.state], e.state === "awaiting_confirmation" ? "warn" : "info") : badge(e.state), h("span", { class: "feed-action" }, e.action.replace(/_/g, " ")), e.error_message ? h("span", { class: "muted small" }, e.error_message) : null, h("span", { class: "muted feed-time" }, ago(e.action_time)))))
             : h("p", { class: "muted" }, "No actions on this device yet."),
           h("div", { class: "btn-row" }, h("button", { class: "btn btn-sm", type: "button", onclick: async () => {
             clear(historyBox, loading());
@@ -240,7 +273,7 @@ export async function deviceDetailView(el, ctx, id) {
         ),
         danger.length ? h("section", { class: "card danger-zone" },
           h("div", { class: "card-head" }, h("h2", {}, "Destructive actions")),
-          h("p", { class: "muted small" }, `Each needs a code from your email and the last 4 characters of the ${d.confirm_tag?.source ?? "serial number"}, so two phones with the same name can't be mixed up.`),
+          h("p", { class: "muted small" }, `Each asks you to type the last 4 characters of the ${d.confirm_tag?.source ?? "serial number"}, so two phones with the same name can't be mixed up.`),
           h("div", { class: "btn-row" }, danger.map((a) => h("button", { class: "btn btn-sm btn-danger", type: "button", onclick: () => runAction(d, a, reload) }, a.label))),
         ) : null,
       ),
@@ -258,8 +291,11 @@ function runAction(device, action, done) {
   }
   if (action.id === "reset_passcode") {
     const pw = input({ type: "password", minlength: 4, maxlength: 16, autocomplete: "new-password", placeholder: "4–16 characters" });
-    extra.push(field("New passcode", pw, "Leave empty to let Zoho clear it so the user sets a new one."));
-    get.push(() => (pw.value ? { passcode: pw.value, email_sent_to_user: true } : {}));
+    extra.push(field("New passcode", pw, "Required. 4–16 characters, and it must meet the passcode policy of the phone's groups. Zoho emails the new passcode to the device user."));
+    get.push(() => {
+      if (pw.value.length < 4 || pw.value.length > 16) throw Object.assign(new Error("Enter the new passcode (4–16 characters)"), { code: "VALIDATION_FAILED" });
+      return { passcode: pw.value, email_sent_to_user: true };
+    });
   }
   const params = () => Object.assign({}, ...get.map((g) => g()));
 
@@ -273,7 +309,7 @@ function runAction(device, action, done) {
     return modal(action.label, h("div", { class: "stack" }, extra), [{ label: "Cancel" }, { label: "Send", tone: "primary", onClick: go }]);
   }
 
-  // Two-step: (1) server emails a code to your sign-in email, (2) code + serial tail (confirm.js).
+  // Two-step: (1) review here, (2) type the serial tail (confirm.js). Nothing is sent before step 2.
   const idem = newIdempotencyKey();
   const tag = device.confirm_tag;
   modal(`${action.label}?`, h("div", { class: "stack" },
@@ -281,10 +317,10 @@ function runAction(device, action, done) {
       tag ? ` (${tag.source} ending ${tag.tag})` : "", ". ",
       action.id === "complete_wipe" ? "Everything on the phone is erased and cannot be recovered." : ""),
     ...extra,
-    h("p", { class: "muted" }, "Step 1 of 2: we email a confirmation code to your sign-in email."),
+    h("p", { class: "muted" }, "Step 1 of 2. Nothing is sent to the phone until you confirm on the next screen."),
   ), [
     { label: "Cancel" },
-    { label: "Email me the code", tone: "danger", onClick: async () => {
+    { label: "Continue", tone: "danger", onClick: async () => {
       const res = await post("/api/commands", { deviceIds: [device.id], action: action.id, params: params() }, { idem });
       confirmDestructive(res, action.label, () => done?.());
     } },

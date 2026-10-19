@@ -516,6 +516,9 @@ const SYNC_LEASE_SECONDS = 20 * 60;
  *  scheduled sync leaves it alone for a while (a manual sync still tries). */
 const COMPLIANCE_BACKOFF_MS = 6 * 3600_000;
 const complianceFailedAt = new Map<string, number>();
+/** Zoho answered 4xx (e.g. 405: the compliance API isn't on this account): skip it for a day, even on manual sync. */
+const complianceUnavailableAt = new Map<string, number>();
+const COMPLIANCE_UNAVAILABLE_MS = 24 * 3600_000;
 
 /**
  * One sync per enterprise at a time, across every process (lease "sync:<eid>").
@@ -552,6 +555,10 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
   const result: Record<string, number | string> = {};
   for (const resource of ordered) {
     await renew();
+    if (resource === "compliance" && Date.now() - (complianceUnavailableAt.get(eid) ?? 0) < COMPLIANCE_UNAVAILABLE_MS) {
+      result[resource] = "skipped: not available on this Zoho account";
+      continue;
+    }
     if (resource === "compliance" && !adminId && Date.now() - (complianceFailedAt.get(eid) ?? 0) < COMPLIANCE_BACKOFF_MS) {
       result[resource] = "skipped: failed recently";
       continue;
@@ -577,7 +584,10 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
     } catch (e) {
       const err = toAppError(e);
       result[resource] = `error: ${err.code}`;
-      if (resource === "compliance") complianceFailedAt.set(eid, Date.now());
+      if (resource === "compliance") {
+        complianceFailedAt.set(eid, Date.now());
+        if (err.code === "ZOHO_BAD_REQUEST" || err.code === "ZOHO_NOT_FOUND") complianceUnavailableAt.set(eid, Date.now());
+      }
       if (runId) {
         await db().from("sync_runs").update({ status: "failed", error: `${err.code}: ${err.message}`.slice(0, 500), finished_at: nowIso() })
           .eq("id", runId);

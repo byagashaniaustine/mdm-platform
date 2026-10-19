@@ -126,7 +126,7 @@ export async function resetPasscodeOnGroup(
   );
   const deviceIds = rows.map((r) => r.device_id);
   if (!deviceIds.length) fail("CONFLICT", `Group "${g.name}" has no enrolled devices`);
-  // Two-step: nothing is sent until the emailed code + group name are confirmed.
+  // Two-step: nothing is sent until the admin confirms by typing the group name.
   return await requestGroupPasscodeReset(s, g, deviceIds, {
     passcode: input.passcode,
     email_sent_to_user: input.emailUser,

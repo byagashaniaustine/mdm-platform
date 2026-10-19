@@ -258,8 +258,8 @@ export async function groupDetailView(el, ctx, id) {
       field("New passcode", pw),
       h("label", { class: "pick" }, emailUser, h("span", {}, "Email the passcode to the device user")),
       h("label", { class: "pick" }, emailAdmin, h("span", {}, "Email the passcode to me")),
-      h("p", { class: "muted small" }, "Next we email you a code. Nothing changes on any phone until you enter it."),
-    ), [{ label: "Cancel" }, { label: "Email me the code", tone: "danger", onClick: async () => {
+      h("p", { class: "muted small" }, "Next you confirm by typing the group name. Nothing changes on any phone until then."),
+    ), [{ label: "Cancel" }, { label: "Continue", tone: "danger", onClick: async () => {
       if (!pw.value || pw.value.length < 4 || pw.value.length > 16) {
         throw Object.assign(new Error("Passcode must be 4–16 characters"), { code: "VALIDATION_FAILED" });
       }
@@ -268,7 +268,7 @@ export async function groupDetailView(el, ctx, id) {
         email_sent_to_user: emailUser.checked,
         email_sent_to_admin: emailAdmin.checked,
       });
-      // Step 2: emailed code + group name (confirm.js); per-device commands are sent only then.
+      // Step 2: type the group name (confirm.js); per-device commands are sent only then.
       confirmDestructive(res, "Set passcode on all members", (r) => {
         const n = (r.data?.events ?? []).length;
         toast(`Passcode reset sent to ${n} device${n === 1 ? "" : "s"}`, "info");
@@ -327,7 +327,7 @@ export async function groupDetailView(el, ctx, id) {
         ) : null,
         admin && g.devices.length ? h("section", { class: "card danger-zone" },
           h("div", { class: "card-head" }, h("h2", {}, "Passcode for all members")),
-          h("p", { class: "muted small" }, "Changes the lock-screen passcode on every enrolled device in this group. Needs a code from your email."),
+          h("p", { class: "muted small" }, "Changes the lock-screen passcode on every enrolled device in this group. You confirm by typing the group name."),
           h("div", { class: "btn-row" },
             h("button", { class: "btn btn-sm btn-danger", type: "button", onclick: resetPasscode }, "Set passcode on all members"),
           ),

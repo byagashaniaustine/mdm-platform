@@ -66,10 +66,11 @@ export type RestrictionDef =
     key: string;
     label: string;
     category: RestrictionCategory;
-    allow: number;
-    restrict: number;
+    allow: number | boolean; // Android uses numbers (1/0 or 1/2); iOS uses true/false
+    restrict: number | boolean;
     recommended: "allow" | "restrict";
     hint?: string;
+    supervised?: boolean; // iOS: Apple only enforces it on supervised devices
   }
   | {
     kind: "enum";
@@ -98,6 +99,7 @@ export type RestrictionDef =
     category: RestrictionCategory;
     recommended?: boolean;
     hint?: string;
+    supervised?: boolean;
   };
 
 export const ANDROID_RESTRICTIONS: readonly RestrictionDef[] = [
@@ -151,7 +153,52 @@ export const ANDROID_RESTRICTIONS: readonly RestrictionDef[] = [
   { kind: "boolean", key: "adaptive_brightness", label: "Adaptive brightness", category: "display", recommended: true },
 ];
 
+/**
+ * iOS RESTRICTIONS_POLICY (payload "restrictionspolicy", guide section "iOS PROFILES").
+ * Every field is a boolean: allow_* true = allowed, false = restricted; force_* true = enforced.
+ * A curated subset of the ~100 fields; `supervised` marks ones Apple applies only to
+ * supervised devices (Apple Business Manager / Configurator).
+ */
+export const IOS_RESTRICTIONS: readonly RestrictionDef[] = [
+  // ----------------------------------------------------------- security
+  { kind: "binary", key: "allow_erase_content_settings", label: "Erase all content and settings", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_profile_installation", label: "Install configuration profiles", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_account_modification", label: "Add or change accounts (iCloud, Mail)", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_modifi_passcode", label: "Change the passcode", category: "security", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_modify_touch_id", label: "Add or remove Touch ID / Face ID", category: "security", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_untrusted_tls_prompt", label: "Accept untrusted certificates", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_usb_restriction_mode", label: "Turn off USB restricted mode", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "boolean", key: "force_encrypted_backup", label: "Require encrypted backups", category: "security", recommended: true },
+  // ---------------------------------------------------------------- apps
+  { kind: "binary", key: "allow_app_installation", label: "Install apps from the App Store", category: "apps", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_app_removal", label: "Delete apps", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_inapp_purchase", label: "In-app purchases", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_safari", label: "Safari", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_imessage", label: "iMessage", category: "apps", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_face_time", label: "FaceTime", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_game_center", label: "Game Center", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_assistant", label: "Siri", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  // ---------------------------------------------------------------- data
+  { kind: "binary", key: "allow_screen_capture", label: "Screenshots and screen recording", category: "data", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_airdrop", label: "AirDrop", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_cloud_backup", label: "iCloud backup", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_cloud_document_sync", label: "iCloud Drive documents", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_cloud_photo_lib", label: "iCloud Photos", category: "data", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_open_doc_in_unmanaged", label: "Open work documents in personal apps", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_password_sharing", label: "Share Wi-Fi and passwords over AirDrop", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  // ------------------------------------------------------------ hardware
+  { kind: "binary", key: "allow_use_of_camera", label: "Camera", category: "hardware", allow: true, restrict: false, recommended: "allow" },
+  // ------------------------------------------------------- settings/network
+  { kind: "binary", key: "allow_modifi_device_name", label: "Rename the device", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "boolean", key: "force_date_time", label: "Set date and time automatically (user can't change)", category: "settings", recommended: true, supervised: true },
+  { kind: "binary", key: "allow_bluetooth_modification", label: "Change Bluetooth settings", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_vpn_creation", label: "Add VPN configurations", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_app_cellular_data", label: "Change mobile data settings for apps", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "boolean", key: "force_wifi_whitelisting", label: "Only join Wi-Fi networks sent by MDM", category: "network", recommended: false, supervised: true },
+];
+
 const RESTRICTION_BY_KEY = new Map(ANDROID_RESTRICTIONS.map((r) => [r.key, r] as const));
+const IOS_RESTRICTION_BY_KEY = new Map(IOS_RESTRICTIONS.map((r) => [r.key, r] as const));
 
 /**
  * Resolve a user choice into the raw Zoho value for one restriction.
@@ -186,11 +233,15 @@ function resolveRestriction(def: RestrictionDef, choice: unknown): number | bool
   }
 }
 
-export function buildRestrictionsPayload(selection: Record<string, unknown>): Record<string, number | boolean> {
+export function buildRestrictionsPayload(
+  selection: Record<string, unknown>,
+  platform: "android" | "ios" = "android",
+): Record<string, number | boolean> {
+  const catalog = platform === "ios" ? IOS_RESTRICTION_BY_KEY : RESTRICTION_BY_KEY;
   const out: Record<string, number | boolean> = {};
   for (const [key, raw] of Object.entries(selection)) {
     if (raw === undefined || raw === null || raw === "") continue;
-    const def = RESTRICTION_BY_KEY.get(key);
+    const def = catalog.get(key);
     if (!def) fail("VALIDATION_FAILED", `Unknown restriction: ${key}`);
     out[key] = resolveRestriction(def, raw);
   }
@@ -327,6 +378,47 @@ export function buildPasscodePayload(input: {
   if (p.auto_lock_idle_for < 5 || p.auto_lock_idle_for > 1800) fail("VALIDATION_FAILED", "autoLockSeconds must be 5–1800");
   if (p.grace_period < 1 || p.grace_period > 1000) fail("VALIDATION_FAILED", "gracePeriodMinutes must be 1–1000");
   if (![0, 1].includes(p.allow_fingerprint)) fail("VALIDATION_FAILED", "allowFingerprint must be 0 or 1");
+  return p;
+}
+
+/**
+ * iOS PASSCODE_POLICY (payload "passcodepolicy"). Ranges from the guide's iOS table.
+ * max_failed_attempts: the iPhone ERASES itself after this many wrong passcodes (3–9).
+ */
+export const IOS_AUTO_LOCK_MINUTES = [1, 2, 3, 4, 5, 10, 15] as const;
+export function buildIosPasscodePayload(input: {
+  allowSimple?: boolean; // allow 1234 / 1111-style passcodes
+  requireAlphanumeric?: boolean;
+  minLength?: number; // 1–16
+  minComplexChars?: number; // 1–4 special characters
+  autoLockMinutes?: number; // one of IOS_AUTO_LOCK_MINUTES
+  maxAgeDays?: number; // 1–170
+  history?: number; // 1–50 previous passcodes that can't be reused
+  gracePeriodMinutes?: number; // 0–240 minutes before the passcode is asked again
+  maxFailedAttempts?: number; // 3–9, then the device is erased
+}) {
+  const p: Record<string, number | boolean> = {
+    allow_simple_value: input.allowSimple ?? false,
+    require_alphanumeric: input.requireAlphanumeric ?? false,
+    min_passcode_length: input.minLength ?? 6,
+  };
+  const range = (key: string, v: number | undefined, min: number, max: number) => {
+    if (v === undefined || v === null) return;
+    if (!Number.isInteger(v) || v < min || v > max) fail("VALIDATION_FAILED", `${key} must be ${min}–${max}`);
+    p[key] = v;
+  };
+  range("min_passcode_length", input.minLength ?? 6, 1, 16);
+  range("min_complex_chars", input.minComplexChars, 1, 4);
+  range("max_passcode_age", input.maxAgeDays, 1, 170);
+  range("no_of_passcode_maintained", input.history, 1, 50);
+  range("max_grace_period", input.gracePeriodMinutes, 0, 240);
+  range("max_failed_attempts", input.maxFailedAttempts, 3, 9);
+  if (input.autoLockMinutes !== undefined) {
+    if (!IOS_AUTO_LOCK_MINUTES.includes(input.autoLockMinutes as typeof IOS_AUTO_LOCK_MINUTES[number])) {
+      fail("VALIDATION_FAILED", `autoLockMinutes must be one of ${IOS_AUTO_LOCK_MINUTES.join(", ")}`);
+    }
+    p.auto_lock_idle_for = input.autoLockMinutes;
+  }
   return p;
 }
 

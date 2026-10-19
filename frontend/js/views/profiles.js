@@ -52,10 +52,21 @@ export async function profilesView(el, ctx) {
 function profileWizard(el, ctx, catalog, existing) {
   const name = input({ maxlength: 100, placeholder: "Baseline – Security", value: existing?.name ?? "" });
   const desc = input({ maxlength: 300 });
-  const platform = select([{ value: "android", label: "Android" }, { value: "ios", label: "Apple (custom payload only)" }]);
-  const purpose = select(catalog.purposes.map((p) => ({ value: p.id, label: p.label })));
+  const platform = select([{ value: "android", label: "Android" }, { value: "ios", label: "Apple (iPhone / iPad)" }]);
+  if (existing?.platform) platform.value = existing.platform;
+  const plat = () => platform.value;
+  const purpose = select([]);
+  // Only offer policies the chosen platform supports (Apple: restrictions, passcode, custom).
+  const fillPurposes = () => {
+    const keep = purpose.value;
+    purpose.replaceChildren(...catalog.purposes
+      .filter((p) => !p.platforms || p.platforms.includes(plat()))
+      .map((p) => h("option", { value: p.id }, p.label)));
+    if ([...purpose.options].some((o) => o.value === keep)) purpose.value = keep;
+  };
+  fillPurposes();
   platform.addEventListener("change", () => {
-    if (platform.value === "ios") purpose.value = "custom";
+    fillPurposes();
     renderForm();
   });
   const formBox = h("div", { class: "stack" });
@@ -63,7 +74,10 @@ function profileWizard(el, ctx, catalog, existing) {
 
   const renderForm = () => {
     const kind = purpose.value;
-    if (kind === "restrictions") {
+    if (kind === "passcode" && plat() === "ios") {
+      renderIosPasscode();
+    } else if (kind === "restrictions") {
+      const restrictionList = plat() === "ios" ? catalog.ios.restrictions : catalog.restrictions;
       // Per restriction kind: binary / enum use <select>, integer uses <input type=number>,
       // boolean uses a tri-state <select> (not managed / on / off) so admins can still skip it.
       const choices = {};
@@ -100,13 +114,14 @@ function profileWizard(el, ctx, catalog, existing) {
         choices[r.key] = control;
         const unit = r.kind === "integer" && r.unit ? h("span", { class: "muted small" }, ` ${r.unit}`) : null;
         const hint = r.hint ? h("div", { class: "muted small" }, r.hint) : null;
+        const sup = r.supervised ? [" ", badge("supervised only", "muted")] : null;
         return h("div", { class: "restriction" },
-          h("span", {}, r.label, h("span", { class: "muted small" }, ` · ${r.category}`), hint),
+          h("span", {}, r.label, sup, hint),
           h("span", {}, control, unit),
         );
       };
       // Group rows by category so the long list stays navigable.
-      const byCat = catalog.restrictions.reduce((acc, r) => {
+      const byCat = restrictionList.reduce((acc, r) => {
         (acc[r.category] ??= []).push(r);
         return acc;
       }, {});
@@ -114,10 +129,13 @@ function profileWizard(el, ctx, catalog, existing) {
         h("div", { class: "stack" }, h("h4", { class: "section-head" }, cat), h("div", { class: "restrictions" }, defs.map(rowFor))),
       );
       const preset = h("button", { class: "btn btn-sm", type: "button", onclick: () => {
-        for (const r of catalog.restrictions) if (r.recommended !== undefined) apply[r.key](r.recommended);
+        for (const r of restrictionList) if (r.recommended !== undefined) apply[r.key](r.recommended);
         toast("Recommended corporate baseline applied", "info");
       } }, "Use recommended baseline");
-      clear(formBox, h("div", { class: "row" }, h("h3", {}, "Restrictions"), preset), ...sections);
+      clear(formBox,
+        h("div", { class: "row" }, h("h3", {}, "Restrictions"), preset),
+        plat() === "ios" ? h("p", { class: "muted small" }, "Items marked \u201csupervised only\u201d are ignored by Apple on iPhones that weren\u2019t enrolled through Apple Business Manager.") : null,
+        ...sections);
       collect = () => {
         const restrictions = {};
         for (const [k, get] of Object.entries(read)) {
@@ -309,6 +327,41 @@ function profileWizard(el, ctx, catalog, existing) {
       };
     }
   };
+  function renderIosPasscode() {
+    const simple = h("input", { type: "checkbox" });
+    const alnum = h("input", { type: "checkbox" });
+    const len = input({ type: "number", min: 1, max: 16, value: 6 });
+    const lock = select(catalog.ios.autoLockMinutes.map((m) => ({ value: String(m), label: `${m} minute${m === 1 ? "" : "s"}` })));
+    lock.value = "5";
+    const wipe = select([{ value: "", label: "Never erase" }, ...[3, 4, 5, 6, 7, 8, 9].map((n) => ({ value: String(n), label: `Erase after ${n} wrong attempts` }))]);
+    wipe.value = "9";
+    const age = input({ type: "number", min: 1, max: 170, placeholder: "never" });
+    const history = input({ type: "number", min: 1, max: 50, placeholder: "off" });
+    const grace = input({ type: "number", min: 0, max: 240, placeholder: "Apple default" });
+    clear(formBox,
+      h("p", { class: "muted small" }, "Sets the passcode rules on iPhones and iPads. Users are asked to choose a passcode that meets them."),
+      h("label", { class: "pick" }, simple, h("span", {}, "Allow simple passcodes (1234, 1111)")),
+      h("label", { class: "pick" }, alnum, h("span", {}, "Require letters and numbers")),
+      field("Minimum length", len),
+      field("Auto-lock after", lock),
+      field("Wrong attempts before the iPhone is erased", wipe, "Apple erases the whole device after this many wrong passcodes. Choose \u201cNever erase\u201d if users may forget theirs."),
+      field("Passcode expires after (days)", age, "Leave empty for no expiry."),
+      field("Remember previous passcodes", history, "Users can't reuse this many old passcodes. Leave empty to allow reuse."),
+      field("Ask for passcode after (minutes)", grace, "How long the phone can stay unlocked after waking. 0 = immediately."),
+    );
+    const num = (el) => (el.value === "" ? undefined : Number(el.value));
+    collect = () => ({
+      allowSimple: simple.checked,
+      requireAlphanumeric: alnum.checked,
+      minLength: Number(len.value),
+      autoLockMinutes: Number(lock.value),
+      maxFailedAttempts: num(wipe),
+      maxAgeDays: num(age),
+      history: num(history),
+      gracePeriodMinutes: num(grace),
+    });
+  }
+
   purpose.addEventListener("change", renderForm);
   renderForm();
 
@@ -345,12 +398,12 @@ async function viewProfile(ctx, catalog, profileId) {
     toastError(err);
     return;
   }
-  const restrictionBy = Object.fromEntries((catalog.restrictions ?? []).map((r) => [r.key, r]));
+  const restrictionBy = Object.fromEntries(((p.platform === "ios" ? catalog.ios?.restrictions : catalog.restrictions) ?? []).map((r) => [r.key, r]));
   const prettyRestriction = (key, val) => {
     const def = restrictionBy[key];
     if (!def) return [key, String(val)];
     if (def.kind === "binary") {
-      const label = Number(val) === def.allow ? "Allow" : Number(val) === def.restrict ? "Restrict" : String(val);
+      const label = String(val) === String(def.allow) ? "Allow" : String(val) === String(def.restrict) ? "Restrict" : String(val);
       return [def.label, label];
     }
     if (def.kind === "enum") {

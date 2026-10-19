@@ -85,6 +85,11 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   });
 
   if (opts.staticRoot) {
+    // Re-check the console's JS/CSS on every load so updates show without a hard refresh.
+    app.use("/*", async (c, next) => {
+      await next();
+      if (!c.req.path.startsWith("/api/")) c.header("Cache-Control", "no-cache");
+    });
     app.use("/*", serveStatic({ root: opts.staticRoot }));
     app.get("*", serveStatic({ path: `${opts.staticRoot}/index.html` }));
   }

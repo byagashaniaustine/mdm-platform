@@ -147,7 +147,7 @@ Deno.test("destructive actions need confirmation and the owner role", () => {
   assert.equal(DEVICE_ACTIONS.complete_wipe.confirm, true);
   assert.equal(DEVICE_ACTIONS.complete_wipe.minRole, "owner");
   assert.equal(DEVICE_ACTIONS.lock.confirm, false);
-  // Every wipe and passcode action must go through the emailed-code step.
+  // Every wipe and passcode action must go through the two-step confirmation.
   assert.deepEqual([...DESTRUCTIVE].sort(), ["clear_passcode", "complete_wipe", "corporate_wipe", "reset_passcode"]);
 });
 
@@ -204,3 +204,47 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
   assert.equal(evaluateDataUse(snap, snap.data_total, 3).spike, false); // idle
   assert.equal(evaluateDataUse(snap, snap.data_total + 5000, 3).spike, true);
 });
+
+// ------------------------------------------------------------ Apple devices
+{
+  const { actionAppliesTo } = await import("../services/commands.ts");
+  const { buildIosPasscodePayload, buildRestrictionsPayload: buildR } = await import("../zoho/payloads.ts");
+  const { buildPayload } = await import("../services/profiles.ts");
+
+  Deno.test("unsupervised iPhones don't get supervised-only commands", () => {
+    const sup = { platform: "ios", is_knox: null, is_supervised: true };
+    const unsup = { platform: "ios", is_knox: null, is_supervised: false };
+    const unknown = { platform: "ios", is_knox: null, is_supervised: null };
+    for (const a of ["enable_lost_mode", "fetch_location", "remote_alarm", "restart", "shutdown"]) {
+      assert.equal(actionAppliesTo(a, sup), true, `${a} supervised`);
+      assert.equal(actionAppliesTo(a, unsup), false, `${a} unsupervised`);
+      assert.equal(actionAppliesTo(a, unknown), true, `${a} unknown is let through`);
+    }
+    for (const a of ["lock", "complete_wipe", "reset_passcode", "scan"]) assert.equal(actionAppliesTo(a, unsup), true, a);
+    assert.equal(actionAppliesTo("pause_kiosk", sup), false);
+    // Android unaffected by the iOS rule
+    assert.equal(actionAppliesTo("enable_lost_mode", { platform: "android", is_knox: false, is_supervised: false }), true);
+  });
+
+  Deno.test("iOS passcode payload uses the guide's ranges", () => {
+    const p = buildIosPasscodePayload({ minLength: 6, autoLockMinutes: 5, maxFailedAttempts: 9, requireAlphanumeric: true });
+    assert.deepEqual(p, { allow_simple_value: false, require_alphanumeric: true, min_passcode_length: 6, auto_lock_idle_for: 5, max_failed_attempts: 9 });
+    assert.throws(() => buildIosPasscodePayload({ maxFailedAttempts: 10 }));
+    assert.throws(() => buildIosPasscodePayload({ maxFailedAttempts: 2 }));
+    assert.throws(() => buildIosPasscodePayload({ autoLockMinutes: 7 }));
+    assert.throws(() => buildIosPasscodePayload({ minLength: 17 }));
+    assert.equal("max_failed_attempts" in buildIosPasscodePayload({}), false, "never erase unless chosen");
+  });
+
+  Deno.test("iOS restrictions are booleans and go to restrictionspolicy", () => {
+    assert.deepEqual(buildR({ allow_use_of_camera: "restrict", allow_airdrop: "allow", force_encrypted_backup: true }, "ios"),
+      { allow_use_of_camera: false, allow_airdrop: true, force_encrypted_backup: true });
+    assert.throws(() => buildR({ allow_factory_reset: "restrict" }, "ios"), "Android-only key rejected for iOS");
+    const r = buildPayload("ios", "restrictions", { restrictions: { allow_app_removal: "restrict" } });
+    assert.equal(r.name, "restrictionspolicy");
+    assert.equal(buildPayload("ios", "passcode", { minLength: 4 }).name, "passcodepolicy");
+    assert.throws(() => buildPayload("ios", "kiosk", {}));
+    // Android unchanged
+    assert.deepEqual(buildR({ allow_camera: "restrict" }), { allow_camera: 2 });
+  });
+}

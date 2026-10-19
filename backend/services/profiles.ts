@@ -12,7 +12,10 @@ import {
   buildFrpPayload,
   buildKioskPayload,
   buildPasscodePayload,
+  buildIosPasscodePayload,
   buildRestrictionsPayload,
+  IOS_AUTO_LOCK_MINUTES,
+  IOS_RESTRICTIONS,
   type KioskApp,
   payloadNameFor,
   type Purpose,
@@ -26,22 +29,41 @@ export const PURPOSES: Purpose[] = ["restrictions", "kiosk", "passcode", "frp", 
 export function profileCatalog() {
   return {
     purposes: [
-      { id: "restrictions", label: "Restrictions", platforms: ["android"] },
+      { id: "restrictions", label: "Restrictions", platforms: ["android", "ios"] },
       { id: "kiosk", label: "Kiosk mode", platforms: ["android"] },
-      { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android"] },
+      { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android", "ios"] },
       { id: "frp", label: "Factory Reset Protection accounts", platforms: ["android"] },
       { id: "custom", label: "Custom payload (raw JSON from the guide)", platforms: ["android", "ios"] },
     ],
     restrictions: ANDROID_RESTRICTIONS,
+    ios: { restrictions: IOS_RESTRICTIONS, autoLockMinutes: IOS_AUTO_LOCK_MINUTES },
   };
 }
 
 /** Turn the dashboard form into { payloadName: body }. */
 export function buildPayload(platform: "android" | "ios", purpose: Purpose, config: Record<string, unknown>) {
-  if (purpose !== "custom" && platform !== "android") fail("VALIDATION_FAILED", "Templates are Android-only; use custom for iOS");
+  if (platform === "ios" && !["restrictions", "passcode", "custom"].includes(purpose)) {
+    fail("VALIDATION_FAILED", "For Apple devices choose Restrictions, Passcode or Custom");
+  }
+  if (platform === "ios" && purpose === "passcode") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosPasscodePayload({
+        allowSimple: config.allowSimple as boolean | undefined,
+        requireAlphanumeric: config.requireAlphanumeric as boolean | undefined,
+        minLength: config.minLength as number | undefined,
+        minComplexChars: config.minComplexChars as number | undefined,
+        autoLockMinutes: config.autoLockMinutes as number | undefined,
+        maxAgeDays: config.maxAgeDays as number | undefined,
+        history: config.history as number | undefined,
+        gracePeriodMinutes: config.gracePeriodMinutes as number | undefined,
+        maxFailedAttempts: config.maxFailedAttempts as number | undefined,
+      }),
+    };
+  }
   switch (purpose) {
     case "restrictions":
-      return { name: payloadNameFor(platform, purpose)!, body: buildRestrictionsPayload((config.restrictions ?? {}) as Record<string, unknown>) };
+      return { name: payloadNameFor(platform, purpose)!, body: buildRestrictionsPayload((config.restrictions ?? {}) as Record<string, unknown>, platform) };
     case "kiosk":
       return {
         name: payloadNameFor(platform, purpose)!,

@@ -29,6 +29,7 @@ export function deviceRoutes() {
         params: d.params,
         platforms: d.platforms,
         knoxOnlyAndroid: d.knoxOnlyAndroid ?? false,
+        supervisedOnlyIos: d.supervisedOnlyIos ?? false,
       })),
     }));
 
@@ -139,7 +140,6 @@ export function commandRoutes() {
       ? {
         confirmation: {
           required: true,
-          sent_to: c.get("session").email,
           target: await confirmationTarget(c.get("session").enterpriseId, pending),
         },
       }
@@ -149,7 +149,6 @@ export function commandRoutes() {
   r.post("/:id/confirm", async (c) => {
     const b = await readJson(c.req.raw);
     const ev = await confirmCommand(c.get("session"), uuidParam(c.req.param("id")), {
-      code: str(b, "code", { min: 6, max: 6 }),
       // last 4 of the serial (or the group name for a group passcode reset); deviceName kept for old clients
       typed: str(b, b.typed !== undefined ? "typed" : "deviceName", { max: 200 }),
     });

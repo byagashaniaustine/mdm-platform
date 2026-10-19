@@ -83,12 +83,20 @@ export function toastError(err) {
 
 /** Describe an operation result (200 done / 202 queued). */
 export function toastEvent(res, doneText) {
-  const ev = res.data?.events?.[0];
+  const events = res.data?.events ?? [];
+  const ev = events[0];
   if (!ev) return toast(doneText);
+  // Zoho rejected it: show why, as an error (the HTTP call itself still succeeded).
+  const failed = events.filter((e) => e.state === "failed" || e.state === "dead");
+  if (failed.length) {
+    const why = failed[0].error_message ?? failed[0].error_code ?? "Zoho rejected it";
+    const prefix = events.length > 1 ? `${failed.length} of ${events.length} failed` : `${doneText.replace(/ sent$| queued$/, "")} failed`;
+    return toast(`${prefix}: ${why}`, "bad");
+  }
   if (ev.state === "succeeded") toast(doneText);
   else if (ev.state === "requested") toast(`Queued for retry: ${ev.error_message ?? "Zoho busy"}`, "warn");
   else if (ev.state === "sent" || ev.state === "acknowledged") toast(`${doneText} — sent, waiting for the device`, "info");
-  else if (ev.state === "awaiting_confirmation") toast("Check your email for the confirmation code", "warn");
+  else if (ev.state === "awaiting_confirmation") toast("Waiting for you to confirm", "warn");
   else toast(`${doneText}: ${ev.state}`, "info");
 }
 
