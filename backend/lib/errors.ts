@@ -73,14 +73,14 @@ export function toAppError(e: unknown): AppError {
   return appError("INTERNAL", e instanceof Error ? e.message : String(e));
 }
 
-// Shape returned to the browser. Internal messages for 500s are hidden.
+// Shape returned to the browser. Admin tool — the real reason is more useful than a generic 500.
 export function errorBody(e: AppError) {
   return {
     error: {
       code: e.code,
-      message: e.status >= 500 && e.code === "INTERNAL" ? ERROR_CATALOG.INTERNAL.message : e.message,
+      message: e.message,
       retryable: e.retryable,
-      details: e.status < 500 ? e.details : undefined,
+      details: e.details,
     },
   };
 }
