@@ -296,15 +296,11 @@ td.check, th.check { width: 36px; }
 
 /* map */
 .map-wrap { width: 100%; overflow: hidden; border-radius: var(--radius-sm); border: 1px solid var(--line); margin: 8px 0; }
-.map { display: block; width: 100%; height: auto; }
-.map-bg { fill: var(--ivory); }
-.fence { stroke-width: 2; fill-opacity: 0.12; }
-.fence-allowed { stroke: var(--ok); fill: var(--ok); }
-.fence-restricted { stroke: var(--bad); fill: var(--bad); stroke-dasharray: 6 4; }
-.dot { fill: var(--charcoal); stroke: var(--copper); stroke-width: 2; }
-.dot-stale { fill: var(--stone); stroke: var(--white); }
-.map-label { font: 500 12px var(--font-body); fill: var(--charcoal); paint-order: stroke; stroke: var(--ivory); stroke-width: 3px; }
-.map-scale line { stroke: var(--charcoal); stroke-width: 2; }
+.map { display: block; width: 100%; height: 420px; background: var(--ivory); }
+@media (max-width: 600px) { .map { height: 320px; } }
+.map-tip { background: var(--white); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; font: 500 12px var(--font-body); color: var(--charcoal); box-shadow: var(--shadow); }
+.map-tip::before { display: none; }
+.leaflet-container { font-family: var(--font-body); }
 
 /* --------------------------------------------------- modal / sheet */
 .overlay { position: fixed; inset: 0; background: rgba(29, 29, 27, 0.55); display: grid; place-items: center; padding: 16px; z-index: 50; }

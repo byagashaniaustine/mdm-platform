@@ -1,55 +1,82 @@
 import { api, del, get, post } from "../api.js";
 import { ago, badge, clear, emptyState, field, fmtTime, h, icon, input, loading, modal, pageHeader, responsive, select, toast, toastError } from "../ui.js";
 
-const SVGNS = "http://www.w3.org/2000/svg";
-function s(tag, attrs = {}, ...children) {
-  const el = document.createElementNS(SVGNS, tag);
-  for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null) el.setAttribute(k, String(v));
-  for (const c of children.flat()) if (c) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  return el;
+const TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TILE_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
+const STALE_MS = 6 * 3600_000;
+
+function leafletReady() {
+  if (window.L) return Promise.resolve(window.L);
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const check = () => {
+      if (window.L) resolve(window.L);
+      else if (Date.now() - t0 > 10_000) reject(new Error("Map library failed to load"));
+      else setTimeout(check, 50);
+    };
+    check();
+  });
 }
 
-/** Simple projected map (no tiles, no third-party scripts): devices as dots, geofences as circles. */
-function mapSvg(points, fences, names) {
-  const W = 760, H = 420, PAD = 40;
-  const lats = [...points.map((p) => p.latitude), ...fences.map((f) => f.latitude)];
-  const lons = [...points.map((p) => p.longitude), ...fences.map((f) => f.longitude)];
-  if (!lats.length) return null;
-  const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
-  const kx = Math.cos((midLat * Math.PI) / 180); // shrink longitude away from the equator
-  const mPerDegLat = 111_320;
-  // Expand the box so whole fences are visible.
-  const pad = Math.max(0.002, ...fences.map((f) => f.radius_m / mPerDegLat));
-  let minLat = Math.min(...lats) - pad, maxLat = Math.max(...lats) + pad;
-  let minLon = Math.min(...lons) - pad / kx, maxLon = Math.max(...lons) + pad / kx;
-  const spanX = (maxLon - minLon) * kx, spanY = maxLat - minLat;
-  const scale = Math.min((W - 2 * PAD) / spanX, (H - 2 * PAD) / spanY);
-  const offX = (W - spanX * scale) / 2, offY = (H - spanY * scale) / 2;
-  const X = (lon) => offX + (lon - minLon) * kx * scale;
-  const Y = (lat) => H - (offY + (lat - minLat) * scale);
-  const metres = (m) => (m / mPerDegLat) * scale;
+/** Render devices as dots and geofences as circles on an OpenStreetMap tile layer. */
+function tileMap(points, fences, names) {
+  if (!points.length && !fences.length) return null;
+  const container = h("div", { class: "map", role: "img", "aria-label": "Device locations and geofences" });
 
-  const kmBar = Math.min(5000, Math.max(100, Math.round(((W - 2 * PAD) / 4 / scale) * mPerDegLat / 100) * 100));
-  return s("svg", { viewBox: `0 0 ${W} ${H}`, class: "map", role: "img", "aria-label": "Device locations and geofences" },
-    s("rect", { x: 0, y: 0, width: W, height: H, class: "map-bg" }),
-    fences.map((f) =>
-      s("g", {},
-        s("circle", { cx: X(f.longitude), cy: Y(f.latitude), r: Math.max(metres(f.radius_m), 3), class: f.kind === "restricted" ? "fence fence-restricted" : "fence fence-allowed" }),
-        s("text", { x: X(f.longitude), y: Y(f.latitude) - Math.max(metres(f.radius_m), 3) - 4, class: "map-label", "text-anchor": "middle" }, f.name),
-      )
-    ),
-    points.map((p) =>
-      s("g", {},
-        s("circle", { cx: X(p.longitude), cy: Y(p.latitude), r: 6, class: Date.now() - Date.parse(p.located_at) > 6 * 3600_000 ? "dot dot-stale" : "dot" },
-          s("title", {}, `${names.get(p.device_id) ?? "device"} · ${fmtTime(p.located_at)}`)),
-        s("text", { x: X(p.longitude) + 9, y: Y(p.latitude) + 4, class: "map-label" }, names.get(p.device_id) ?? ""),
-      )
-    ),
-    s("g", { class: "map-scale" },
-      s("line", { x1: PAD, y1: H - 18, x2: PAD + metres(kmBar), y2: H - 18 }),
-      s("text", { x: PAD, y: H - 24, class: "map-label" }, kmBar >= 1000 ? `${kmBar / 1000} km` : `${kmBar} m`),
-    ),
-  );
+  queueMicrotask(async () => {
+    try {
+      const L = await leafletReady();
+      if (!container.isConnected) return;
+      const css = getComputedStyle(document.documentElement);
+      const ok = css.getPropertyValue("--ok").trim() || "#3F6B4F";
+      const bad = css.getPropertyValue("--bad").trim() || "#9B3326";
+      const copper = css.getPropertyValue("--copper").trim() || "#C18064";
+      const charcoal = css.getPropertyValue("--charcoal").trim() || "#1D1D1B";
+      const stone = css.getPropertyValue("--stone").trim() || "#BBB7B6";
+
+      const map = L.map(container, { scrollWheelZoom: false, zoomControl: true });
+      L.tileLayer(TILE_URL, { maxZoom: 19, attribution: TILE_ATTRIB }).addTo(map);
+      L.control.scale({ metric: true, imperial: false }).addTo(map);
+
+      const latLngs = [];
+      for (const f of fences) {
+        const color = f.kind === "restricted" ? bad : ok;
+        const circle = L.circle([f.latitude, f.longitude], {
+          radius: f.radius_m,
+          color,
+          weight: 2,
+          fillColor: color,
+          fillOpacity: 0.12,
+          dashArray: f.kind === "restricted" ? "6 4" : null,
+        }).addTo(map);
+        circle.bindTooltip(f.name, { permanent: true, direction: "top", className: "map-tip" });
+        latLngs.push(circle.getBounds().getNorthEast(), circle.getBounds().getSouthWest());
+      }
+      for (const p of points) {
+        const stale = Date.now() - Date.parse(p.located_at) > STALE_MS;
+        const marker = L.circleMarker([p.latitude, p.longitude], {
+          radius: 7,
+          color: stale ? stone : copper,
+          weight: 2,
+          fillColor: stale ? stone : charcoal,
+          fillOpacity: 1,
+        }).addTo(map);
+        const name = names.get(p.device_id) ?? "device";
+        marker.bindTooltip(name, { direction: "right", offset: [10, 0], className: "map-tip" });
+        const popup = h("div", {}, h("strong", {}, name), h("br"), fmtTime(p.located_at));
+        marker.bindPopup(popup);
+        latLngs.push([p.latitude, p.longitude]);
+      }
+
+      if (latLngs.length) map.fitBounds(L.latLngBounds(latLngs), { padding: [30, 30], maxZoom: 16 });
+      else map.setView([0, 0], 2);
+      map.invalidateSize();
+    } catch (err) {
+      container.replaceChildren(h("p", { class: "muted", style: "padding: 16px;" }, err?.message ?? "Map failed to load."));
+    }
+  });
+
+  return container;
 }
 
 export async function locationsView(el, ctx) {
@@ -73,7 +100,7 @@ export async function locationsView(el, ctx) {
     const pts = await get(`/api/locations/device/${d.id}?hours=24`);
     clear(historyBox,
       h("h3", {}, `${d.device_name} — last 24 h (${pts.length} points)`),
-      pts.length ? h("div", { class: "map-wrap" }, mapSvg(pts.map((p) => ({ ...p, device_id: d.id })), enabledFences, names)) : h("p", { class: "muted" }, "No points in the last 24 hours."),
+      pts.length ? h("div", { class: "map-wrap" }, tileMap(pts.map((p) => ({ ...p, device_id: d.id })), enabledFences, names)) : h("p", { class: "muted" }, "No points in the last 24 hours."),
     );
   };
 
@@ -111,7 +138,7 @@ export async function locationsView(el, ctx) {
   };
 
   const osm = (p) => `https://www.openstreetmap.org/?mlat=${p.latitude}&mlon=${p.longitude}#map=16/${p.latitude}/${p.longitude}`;
-  const map = mapSvg(latest.points, enabledFences, names);
+  const map = tileMap(latest.points, enabledFences, names);
 
   clear(
     el,
