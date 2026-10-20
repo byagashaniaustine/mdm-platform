@@ -149,7 +149,7 @@ export async function groupDetailView(el, ctx, id) {
 
     modal(`Blacklist app on ${g.name}`,
       h("div", { class: "stack" },
-        h("p", { class: "muted small" }, "Pick from apps actually installed on this group's devices, or add a package manually. Blocks + prevents fresh installs."),
+        h("p", { class: "muted small" }, "Pick from apps actually installed on this group's devices, or add a package manually. Blocks + prevents fresh installs. iPhone: supervised phones hide the app; unsupervised ones only notify the user. Android: removed on Samsung, work-profile and fully managed phones; others only notify the user."),
         listBox,
         manualBox,
         addManualBtn,

@@ -227,12 +227,12 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     const sup = { platform: "ios", is_knox: null, is_supervised: true };
     const unsup = { platform: "ios", is_knox: null, is_supervised: false };
     const unknown = { platform: "ios", is_knox: null, is_supervised: null };
-    for (const a of ["enable_lost_mode", "fetch_location", "remote_alarm", "restart", "shutdown"]) {
+    for (const a of ["enable_lost_mode", "remote_alarm", "restart", "shutdown"]) {
       assert.equal(actionAppliesTo(a, sup), true, `${a} supervised`);
       assert.equal(actionAppliesTo(a, unsup), false, `${a} unsupervised`);
       assert.equal(actionAppliesTo(a, unknown), true, `${a} unknown is let through`);
     }
-    for (const a of ["lock", "complete_wipe", "clear_passcode", "scan"]) assert.equal(actionAppliesTo(a, unsup), true, a);
+    for (const a of ["lock", "complete_wipe", "clear_passcode", "scan", "fetch_location"]) assert.equal(actionAppliesTo(a, unsup), true, a);
     // Apple MDM can't set a passcode on iOS (only clear it), supervised or not.
     assert.equal(actionAppliesTo("reset_passcode", unsup), false);
     assert.equal(actionAppliesTo("reset_passcode", { ...unsup, is_supervised: true }), false);

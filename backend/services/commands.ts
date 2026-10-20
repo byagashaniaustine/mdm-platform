@@ -40,7 +40,8 @@ export const DEVICE_ACTIONS: Record<string, ActionDef> = {
   scan: { label: "Scan / refresh inventory", minRole: "admin", confirm: false, params: [], history: /scan/i, platforms: ["ios", "android", "macos", "windows", "chrome"] },
   lock: { label: "Lock device", minRole: "admin", confirm: false, params: ["lock_message"], history: /lock/i, platforms: ["ios", "android", "macos"] },
   remote_alarm: { label: "Ring alarm", minRole: "admin", confirm: false, params: [], history: /alarm/i, platforms: ["ios", "android"], supervisedOnlyIos: true },
-  fetch_location: { label: "Fetch location", minRole: "admin", confirm: false, params: [], history: /locat/i, platforms: ["ios", "android"], supervisedOnlyIos: true },
+  // Location comes from Zoho's Self Service app, so it works on unsupervised iPhones too (Zoho docs).
+  fetch_location: { label: "Fetch location", minRole: "admin", confirm: false, params: [], history: /locat/i, platforms: ["ios", "android"] },
   // Shutdown / restart: Apple's MDM protocol exposes these on supervised iOS; macOS does not.
   // On Android the standard protocol has no shutdown/restart — only Samsung Knox does, via /knox_actions/.
   restart: { label: "Restart", minRole: "admin", confirm: false, params: [], history: /restart|reboot/i, platforms: ["ios", "android"], knoxOnlyAndroid: true, supervisedOnlyIos: true },
@@ -385,7 +386,7 @@ const NOT_APPLICABLE_HINT: Record<string, string> = {
   pause_kiosk: "The phone isn't in kiosk mode right now.",
   re_apply_kiosk: "The phone has no kiosk profile applied right now.",
   enable_lost_mode: "Lost mode needs a company-owned phone (and, on iPhone, a supervised one).",
-  fetch_location: "Location needs the Zoho MDM app with location permission on the phone (and, on iPhone, a supervised device).",
+  fetch_location: "Location needs Zoho's Self Service (ME MDM) app on the phone with location set to \"Always\". On unsupervised iPhones, Geo-Tracking in Zoho must also be set to \"Always\".",
   restart: "Restart needs a Samsung Knox phone on Android or a supervised iPhone.",
   shutdown: "Shut down needs a Samsung Knox phone on Android or a supervised iPhone.",
 };

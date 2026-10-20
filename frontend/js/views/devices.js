@@ -23,9 +23,9 @@ function adminMode(d) {
     return { label: "work profile", tone: "info", hint: "Agent only controls the work-profile container. Device-wide restrictions won't apply." };
   }
   if (d.platform === "ios") {
-    if (d.is_supervised === true) return { label: "supervised", tone: "ok", hint: "Full company control: lost mode, location, restart and supervised-only restrictions all work." };
+    if (d.is_supervised === true) return { label: "supervised", tone: "ok", hint: "Full company control: lost mode, restart, silent app installs, app blocking and supervised-only restrictions all work." };
     if (d.is_supervised === false) {
-      return { label: "not supervised", tone: "warn", hint: "Apple limits unsupervised iPhones: lost mode, location, ring alarm and restart aren't available, and some restrictions are ignored. Enrol it through Apple Business Manager to supervise it." };
+      return { label: "not supervised", tone: "warn", hint: "Apple limits unsupervised iPhones: lost mode, ring alarm, restart and shut down aren't available, apps need the user to accept, and some restrictions are ignored. Enrol it through Apple Business Manager to supervise it." };
     }
     return { label: "supervision unknown", tone: "muted", hint: "Not reported by Zoho yet. Sync again after the iPhone checks in." };
   }
@@ -219,8 +219,8 @@ export async function deviceDetailView(el, ctx, id) {
     d.platform === "ios" && d.is_supervised === false
       ? h("div", { class: "banner banner-info" }, icon("shield"), h("div", {},
         h("strong", {}, "Not supervised. "),
-        "Apple doesn't allow lost mode, location, ring alarm, restart or shut down on unsupervised iPhones, so they're hidden. ",
-        "Lock, passcode and wipe still work. To get full control, enrol the iPhone through Apple Business Manager."))
+        "Apple doesn't allow lost mode, ring alarm, restart or shut down on unsupervised iPhones, so they're hidden. ",
+        "Lock, location (with the Self Service app), clear passcode and wipe still work. To get full control, enrol the iPhone through Apple Business Manager."))
       : null,
     h("div", { class: "split" },
       h("div", {},
