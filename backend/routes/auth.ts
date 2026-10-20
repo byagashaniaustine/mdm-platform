@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { getConfig } from "../config.ts";
-import { email, oneOf, readJson, str } from "../lib/validate.ts";
+import { email, oneOf, readJson, str, uuidParam } from "../lib/validate.ts";
 import { type AppEnv, clientIp, rateLimit, requireRole, requireSession, SESSION_COOKIE } from "../middleware/auth.ts";
-import { hasPasswordSet, inviteAdmin, listAdmins, loginWithPassword, logout, registerEnterprise, requestLoginOtp, resetPasswordWithOtp, setOwnPassword, verifyOtp } from "../services/auth.ts";
+import { acceptInvite, hasPasswordSet, inviteAdmin, listAdmins, loginWithPassword, logout, registerEnterprise, removeAdmin, requestLoginOtp, createInviteLink, resetPasswordWithOtp, setAdminActive, setOwnPassword, transferOwnership, updateAdminRole, verifyOtp } from "../services/auth.ts";
 
 export function authRoutes() {
   const r = new Hono<AppEnv>();
@@ -49,6 +49,24 @@ export function authRoutes() {
     const b = await readJson(c.req.raw);
     const { token, expiresAt } = await loginWithPassword({
       email: email(b),
+      password: str(b, "password", { max: 200 }),
+      ip: clientIp(c),
+      userAgent: c.req.header("user-agent") ?? null,
+    });
+    setCookie(c, SESSION_COOKIE, token, {
+      httpOnly: true,
+      secure: getConfig().cookieSecure,
+      sameSite: "Strict",
+      path: "/",
+      expires: expiresAt,
+    });
+    return c.json({ data: { ok: true } });
+  });
+
+  r.post("/accept-invite", strict, async (c) => {
+    const b = await readJson(c.req.raw);
+    const { token, expiresAt } = await acceptInvite({
+      code: str(b, "code", { max: 200 }),
       password: str(b, "password", { max: 200 }),
       ip: clientIp(c),
       userAgent: c.req.header("user-agent") ?? null,
@@ -125,7 +143,34 @@ export function adminRoutes() {
       str(b, "fullName", { max: 120 }),
       oneOf(b, "role", ["admin", "viewer"] as const, "admin"),
     );
-    return c.json({ data: { id: admin.id, email: admin.email, role: admin.role } }, 201);
+    const invite = await createInviteLink(c.get("session"), admin.id, clientIp(c));
+    return c.json({ data: { id: admin.id, email: admin.email, role: admin.role, invite } }, 201);
+  });
+  r.patch("/:id", requireRole("owner"), async (c) => {
+    const b = await readJson(c.req.raw);
+    const role = oneOf(b, "role", ["admin", "viewer"] as const);
+    const admin = await updateAdminRole(c.get("session"), uuidParam(c.req.param("id")), role);
+    return c.json({ data: { id: admin.id, email: admin.email, role: admin.role, is_active: admin.is_active } });
+  });
+  r.post("/:id/transfer-ownership", requireRole("owner"), async (c) => {
+    await transferOwnership(c.get("session"), uuidParam(c.req.param("id")));
+    return c.json({ data: { ok: true } });
+  });
+  r.post("/:id/deactivate", requireRole("owner"), async (c) => {
+    const admin = await setAdminActive(c.get("session"), uuidParam(c.req.param("id")), false);
+    return c.json({ data: { id: admin.id, is_active: admin.is_active } });
+  });
+  r.post("/:id/activate", requireRole("owner"), async (c) => {
+    const admin = await setAdminActive(c.get("session"), uuidParam(c.req.param("id")), true);
+    return c.json({ data: { id: admin.id, is_active: admin.is_active } });
+  });
+  r.delete("/:id", requireRole("owner"), async (c) => {
+    await removeAdmin(c.get("session"), uuidParam(c.req.param("id")));
+    return c.json({ data: { ok: true } });
+  });
+  // One-time link to share with the admin (no email needed). Works as an invite or a password reset.
+  r.post("/:id/invite-link", requireRole("owner"), async (c) => {
+    return c.json({ data: await createInviteLink(c.get("session"), uuidParam(c.req.param("id")), clientIp(c)) });
   });
   return r;
 }

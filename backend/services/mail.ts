@@ -20,8 +20,9 @@ export async function sendMail(mail: Mail): Promise<void> {
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
-    log("error", "mail.send_failed", { status: res.status });
-    throw appError("INTERNAL", "Could not send email");
+    const body = await res.text().catch(() => "");
+    log("error", "mail.send_failed", { status: res.status, body: body.slice(0, 300) });
+    throw appError("INTERNAL", `Resend rejected the email (${res.status}): ${body.slice(0, 200) || "no details"}`);
   }
 }
 
@@ -53,5 +54,42 @@ export function otpMail(to: string, code: string, minutes: number): Mail {
     to,
     subject: `Your MDM Console sign-in code: ${code}`,
     text: `Your sign-in code is ${code}.\nIt expires in ${minutes} minutes. If you did not request it, ignore this email.`,
+  };
+}
+
+export function inviteMail(opts: {
+  to: string;
+  link: string;
+  kind: "invite" | "reset";
+  enterpriseName: string;
+  inviter: string;
+  role: string;
+  expiresAt: Date;
+}): Mail {
+  const { to, link, kind, enterpriseName, inviter, role, expiresAt } = opts;
+  const expires = expiresAt.toUTCString();
+  if (kind === "reset") {
+    return {
+      to,
+      subject: `Reset your password on ${enterpriseName} Device Console`,
+      text:
+`${inviter} created a password reset link for your Device Console account.
+
+Open this link to set a new password:
+  ${link}
+
+The link works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
+    };
+  }
+  return {
+    to,
+    subject: `You've been added to ${enterpriseName} on Device Console`,
+    text:
+`${inviter} added you to ${enterpriseName} on the Device Console as a ${role}.
+
+Open this link to set your password and sign in:
+  ${link}
+
+The link works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
   };
 }

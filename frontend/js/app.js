@@ -353,11 +353,73 @@ async function render() {
   refreshCounts();
 }
 
+// Supabase appends "#access_token=…" to the invite link. The hash routing ignores it
+// (unknown route → overview); we only read the "invite" query param our backend put there.
+function inviteCodeFromUrl() {
+  const code = new URL(location.href).searchParams.get("invite");
+  return code && /^[0-9a-f-]{36}\.[A-Za-z0-9_\-]{20,100}$/.test(code) ? code : null;
+}
+
+function stripInviteFromUrl() {
+  const u = new URL(location.href);
+  u.searchParams.delete("invite");
+  u.hash = ""; // drop Supabase's #access_token=… too
+  history.replaceState(null, "", u.pathname + u.search);
+}
+
+function inviteScreen(code) {
+  ctx.shell = null;
+  document.title = "Set your password · Device Console";
+  const pw = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10, placeholder: "At least 10 characters" });
+  const cf = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const form = h("form", { class: "stack" },
+    h("p", { class: "muted" }, "Set the password for your Device Console account. You'll be signed in right after."),
+    field("New password", pw, "At least 10 characters."),
+    field("Confirm password", cf),
+    h("button", { class: "btn btn-primary", type: "submit" }, "Set password and sign in"),
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (pw.value !== cf.value) return toast("Passwords don't match", "warn");
+    try {
+      await post("/api/auth/accept-invite", { code, password: pw.value });
+      stripInviteFromUrl();
+      await boot();
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  clear(root,
+    h("main", { class: "auth" },
+      h("section", { class: "auth-hero" },
+        h("img", { src: "/assets/logo-negative.svg", alt: "Black Swan" }),
+        h("div", {}, h("p", { class: "eyebrow" }, "Device Console"), h("h1", {}, "Welcome aboard."), h("p", {}, "This is a one-time link. Set a password you'll use from now on.")),
+      ),
+      h("section", { class: "auth-main" },
+        h("div", { class: "auth-card" },
+          h("img", { class: "logo-mobile", src: "/assets/logo-primary.svg", alt: "Black Swan" }),
+          h("h2", {}, "Set your password"),
+          form,
+        ),
+      ),
+    ),
+  );
+  pw.focus();
+}
+
 async function boot() {
+  const invite = inviteCodeFromUrl();
   try {
     ctx.me = await get("/api/auth/me");
   } catch {
     ctx.me = null;
+  }
+  if (invite) {
+    if (ctx.me) {
+      await post("/api/auth/logout", {}).catch(() => {});
+      ctx.me = null;
+    }
+    return inviteScreen(invite);
   }
   if (!ctx.me) return authScreen();
   ctx.shell = null;

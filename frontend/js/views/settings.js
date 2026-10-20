@@ -1,6 +1,32 @@
-import { get, post } from "../api.js";
+import { api, del, get, post } from "../api.js";
 import { badge, clear, field, fmtTime, h, input, loading, modal, pageHeader, select, table, tabStrip, toast, toastError } from "../ui.js";
 import { monitoringSection } from "./monitoring-settings.js";
+
+/** Result of creating an invite / reset link: says whether Supabase emailed it, and offers the link to copy. */
+function showInviteLink(inv) {
+  const isReset = inv.kind === "reset";
+  const box = input({ readonly: true, value: inv.link, "aria-label": "Invite link" });
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(inv.link);
+    } catch {
+      box.select();
+      document.execCommand?.("copy");
+    }
+    toast("Link copied");
+  };
+  modal(inv.emailed ? (isReset ? "Password reset sent" : "Invite sent") : "Send this link yourself", h("div", { class: "stack" },
+    inv.emailed
+      ? h("p", {}, `We emailed ${isReset ? "a password reset link" : "an invite"} to `, h("strong", {}, inv.email), ". You can also copy the link and send it another way.")
+      : h("div", { class: "banner banner-warn" }, h("div", {}, h("strong", {}, "The email wasn't sent. "), inv.emailError ?? "")),
+    field(isReset ? "Password reset link" : "Invite link", box,
+      `Works once and expires ${new Date(inv.expiresAt).toLocaleDateString()}. Anyone with the link can ${isReset ? "set this admin's password" : "join as this admin"}, so send it only to ${inv.email}.`),
+  ), [
+    { label: "Close" },
+    { label: "Copy link", tone: "primary", onClick: async () => { await copy(); return true; } },
+  ]);
+  box.addEventListener("focus", () => box.select());
+}
 
 export async function settingsView(el, ctx, params) {
   clear(el, loading());
@@ -65,12 +91,12 @@ export async function settingsView(el, ctx, params) {
     const em = input({ type: "email" });
     const nm = input({});
     const role = select([{ value: "admin", label: "Admin — manage devices, groups, profiles" }, { value: "viewer", label: "Viewer — read only, identifiers masked" }]);
-    modal("Invite admin", h("div", { class: "stack" }, field("Email", em), field("Name", nm), field("Role", role), h("p", { class: "muted" }, "They sign in with a one-time code sent to this email.")), [
+    modal("Invite admin", h("div", { class: "stack" }, field("Email", em), field("Name", nm), field("Role", role), h("p", { class: "muted" }, "We email them an invite link to set their password. You also get the link to copy, in case the email doesn't arrive.")), [
       { label: "Cancel" },
       { label: "Invite", tone: "primary", onClick: async () => {
-        await post("/api/admins", { email: em.value, fullName: nm.value, role: role.value });
-        toast("Admin added");
+        const { data } = await post("/api/admins", { email: em.value, fullName: nm.value, role: role.value });
         reload();
+        if (data?.invite) showInviteLink(data.invite);
       } },
     ]);
   };
@@ -107,14 +133,90 @@ export async function settingsView(el, ctx, params) {
       ),
     );
 
-  const team = () => h("section", { class: "card card-flush" },
-    h("div", { class: "card-head" }, h("h2", {}, "Admins"), owner ? h("button", { class: "btn btn-sm btn-primary", type: "button", onclick: invite }, "Invite admin") : null),
-    h("div", { class: "table-wrap" }, table([
-      { label: "Name", primary: true, cell: (a) => h("div", {}, h("div", { class: "cell-title" }, a.full_name ?? a.email), h("div", { class: "cell-sub" }, a.email)) },
-      { label: "Role", cell: (a) => badge(a.role, a.role === "owner" ? "ok" : "muted") },
-      { label: "Last sign-in", cell: (a) => h("span", { class: "muted" }, fmtTime(a.last_login_at)) },
-    ], admins)),
-  );
+  const team = () => {
+    const selfId = ctx.me.adminId;
+    const run = async (fn, msg) => {
+      try {
+        await fn();
+        if (msg) toast(msg);
+        reload();
+      } catch (err) {
+        toastError(err);
+      }
+    };
+    const confirmThen = (title, body, onYes) => modal(title, body, [
+      { label: "Cancel" },
+      { label: "Confirm", tone: "danger", onClick: onYes },
+    ]);
+
+    const actions = (a) => {
+      if (a.id === selfId) return h("span", { class: "muted small" }, "That's you");
+      if (!owner) return null;
+      if (a.role === "owner") return h("span", { class: "muted small" }, "Owner");
+      const toRole = a.role === "admin" ? "viewer" : "admin";
+      const btns = [
+        h("button", { class: "btn btn-xs", type: "button",
+          onclick: () => run(() => api("PATCH", `/api/admins/${a.id}`, { role: toRole }), `Role changed to ${toRole}`),
+        }, `Make ${toRole}`),
+      ];
+      if (a.role === "admin" && a.is_active) {
+        btns.push(h("button", { class: "btn btn-xs", type: "button",
+          onclick: () => confirmThen(
+            `Transfer ownership to ${a.email}?`,
+            h("p", {}, "You become an admin. Only the new owner can transfer it back. The Zoho connection and this enterprise's data are unaffected."),
+            () => run(async () => { await post(`/api/admins/${a.id}/transfer-ownership`); location.reload(); }),
+          ),
+        }, "Make owner"));
+      }
+      if (a.is_active) {
+        btns.push(h("button", { class: "btn btn-xs", type: "button",
+          onclick: () => confirmThen(
+            `Deactivate ${a.email}?`,
+            h("p", {}, "They can't sign in and any open sessions end immediately. Everything they did stays in the audit log. You can reactivate them later."),
+            () => run(() => post(`/api/admins/${a.id}/deactivate`), "Deactivated"),
+          ),
+        }, "Deactivate"));
+        btns.push(h("button", { class: "btn btn-xs", type: "button",
+          onclick: async () => {
+            try {
+              const { data } = await post(`/api/admins/${a.id}/invite-link`, {});
+              showInviteLink(data);
+            } catch (err) {
+              toastError(err);
+            }
+          },
+        }, a.has_password ? "Reset password" : "Resend invite"));
+      } else {
+        btns.push(h("button", { class: "btn btn-xs", type: "button",
+          onclick: () => run(() => post(`/api/admins/${a.id}/activate`), "Reactivated"),
+        }, "Reactivate"));
+      }
+      btns.push(h("button", { class: "btn btn-xs btn-ghost", type: "button",
+        onclick: () => confirmThen(
+          `Remove ${a.email}?`,
+          h("p", {}, "Permanent. Their audit trail stays but the account is gone. Deactivate instead if you might bring them back."),
+          () => run(() => del(`/api/admins/${a.id}`), "Removed"),
+        ),
+      }, "Remove"));
+      return h("div", { class: "btn-row" }, ...btns);
+    };
+
+    const cols = [
+      { label: "Name", primary: true, cell: (a) => h("div", {},
+        h("div", { class: "cell-title" }, a.full_name ?? a.email, a.id === selfId ? [" ", badge("you", "muted")] : null),
+        h("div", { class: "cell-sub" }, a.email),
+      ) },
+      { label: "Role", cell: (a) => badge(a.role, a.role === "owner" ? "ok" : a.role === "admin" ? "info" : "muted") },
+      { label: "Status", cell: (a) => a.is_active ? badge("active", "ok") : badge("inactive", "warn") },
+      { label: "Last sign-in", cell: (a) => h("span", { class: "muted" }, a.last_login_at ? fmtTime(a.last_login_at) : "Never") },
+      { label: "", class: "actions", cell: actions },
+    ];
+
+    return h("section", { class: "card card-flush" },
+      h("div", { class: "card-head" }, h("h2", {}, "Admins"), owner ? h("button", { class: "btn btn-sm btn-primary", type: "button", onclick: invite }, "Invite admin") : null),
+      h("div", { class: "table-wrap" }, table(cols, admins)),
+    );
+  };
 
   const security = () => {
     const hasPw = Boolean(pwState?.hasPassword);

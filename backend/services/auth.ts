@@ -3,7 +3,8 @@ import { getConfig } from "../config.ts";
 import { db, run, runMaybe } from "../lib/db.ts";
 import { hashPassword, hmacHex, randomDigits, randomToken, safeEqual, sha256Hex, verifyPassword } from "../lib/crypto.ts";
 import { fail } from "../lib/errors.ts";
-import { otpMail, sendMail } from "./mail.ts";
+import { inviteMail, otpMail, sendMail } from "./mail.ts";
+import { log } from "../lib/log.ts";
 import { recordAudit } from "./events.ts";
 import { noteLogin } from "./monitoring.ts";
 
@@ -86,7 +87,7 @@ async function issueOtp(admin: AdminRow, purpose: "login" | "register", ip: stri
 
   // Invalidate older unused codes so only the newest one works.
   await db().from("otp_codes").update({ consumed_at: new Date().toISOString() })
-    .eq("admin_id", admin.id).is("consumed_at", null);
+    .eq("admin_id", admin.id).is("consumed_at", null).neq("purpose", "invite");
 
   const code = randomDigits(6);
   await run(
@@ -113,7 +114,7 @@ export async function verifyOtp(input: {
 
   const otp = await runMaybe<{ id: string; code_hash: string; attempts: number; expires_at: string }>(
     db().from("otp_codes").select("id, code_hash, attempts, expires_at")
-      .eq("admin_id", admin.id).is("consumed_at", null)
+      .eq("admin_id", admin.id).is("consumed_at", null).neq("purpose", "invite")
       .order("created_at", { ascending: false }).limit(1).maybeSingle(),
   );
   if (!otp) fail("AUTH_INVALID_OTP");
@@ -188,10 +189,166 @@ export async function inviteAdmin(session: Session, email: string, fullName: str
 }
 
 export async function listAdmins(enterpriseId: string) {
-  return await run(
-    db().from("admins").select("id, email, full_name, role, is_active, last_login_at, created_at")
+  const rows = await run<(Record<string, unknown> & { password_hash: string | null })[]>(
+    db().from("admins").select("id, email, full_name, role, is_active, last_login_at, created_at, password_hash")
       .eq("enterprise_id", enterpriseId).order("created_at"),
   );
+  return rows.map(({ password_hash, ...a }) => ({ ...a, has_password: Boolean(password_hash) }));
+}
+
+async function requireTeamMember(session: Session, targetId: string): Promise<AdminRow> {
+  const admin = await runMaybe<AdminRow>(
+    db().from("admins").select("*").eq("id", targetId).eq("enterprise_id", session.enterpriseId).maybeSingle(),
+  );
+  if (!admin) fail("NOT_FOUND", "Admin not found in this enterprise");
+  return admin;
+}
+
+function assertNotSelf(session: Session, targetId: string, verb: string) {
+  if (session.adminId === targetId) fail("VALIDATION_FAILED", `You cannot ${verb} yourself`);
+}
+
+export async function updateAdminRole(session: Session, targetId: string, role: Role) {
+  if (role === "owner") fail("VALIDATION_FAILED", "Use transfer ownership to make someone the owner");
+  assertNotSelf(session, targetId, "change the role of");
+  const admin = await requireTeamMember(session, targetId);
+  if (admin.role === "owner") fail("VALIDATION_FAILED", "Transfer ownership before changing the owner's role");
+  if (admin.role === role) return admin;
+  const updated = await run<AdminRow>(
+    db().from("admins").update({ role }).eq("id", targetId).select("*").single(),
+  );
+  await recordAudit({ enterpriseId: session.enterpriseId, adminId: session.adminId, category: "auth", action: "admin.role_changed", params: { target: admin.email, from: admin.role, to: role } });
+  return updated;
+}
+
+export async function transferOwnership(session: Session, targetId: string) {
+  assertNotSelf(session, targetId, "transfer ownership to");
+  const target = await requireTeamMember(session, targetId);
+  if (!target.is_active) fail("VALIDATION_FAILED", "Reactivate the admin before transferring ownership");
+  if (target.role === "viewer") fail("VALIDATION_FAILED", "Promote the viewer to admin before transferring ownership");
+  if (target.role === "owner") return target;
+  // Promote target first — a brief two-owner window is safer than a brief zero-owner window.
+  await run(db().from("admins").update({ role: "owner" }).eq("id", target.id));
+  await run(db().from("admins").update({ role: "admin" }).eq("id", session.adminId));
+  await recordAudit({ enterpriseId: session.enterpriseId, adminId: session.adminId, category: "auth", action: "admin.ownership_transferred", params: { to: target.email } });
+}
+
+export async function setAdminActive(session: Session, targetId: string, active: boolean) {
+  assertNotSelf(session, targetId, active ? "reactivate" : "deactivate");
+  const admin = await requireTeamMember(session, targetId);
+  if (!active && admin.role === "owner") fail("VALIDATION_FAILED", "Transfer ownership before deactivating the owner");
+  if (admin.is_active === active) return admin;
+  const updated = await run<AdminRow>(
+    db().from("admins").update({ is_active: active }).eq("id", targetId).select("*").single(),
+  );
+  if (!active) {
+    await db().from("sessions").update({ revoked_at: new Date().toISOString() }).eq("admin_id", targetId).is("revoked_at", null);
+  }
+  await recordAudit({ enterpriseId: session.enterpriseId, adminId: session.adminId, category: "auth", action: active ? "admin.reactivated" : "admin.deactivated", params: { target: admin.email } });
+  return updated;
+}
+
+export async function removeAdmin(session: Session, targetId: string) {
+  assertNotSelf(session, targetId, "remove");
+  const admin = await requireTeamMember(session, targetId);
+  if (admin.role === "owner") fail("VALIDATION_FAILED", "Transfer ownership before removing the owner");
+  await run(db().from("admins").delete().eq("id", targetId));
+  await recordAudit({ enterpriseId: session.enterpriseId, adminId: session.adminId, category: "auth", action: "admin.removed", params: { target: admin.email } });
+}
+
+// ------------------------------------------------------------ invite links
+// Owner creates a one-time link; Resend emails it (sendMail → mail.ts). If the send fails,
+// the owner still gets the link in the response and can share it another way. Opening the
+// link lets the admin set a password. The same link resets the password of an admin who
+// already has one. Stored like OTP codes (purpose "invite", HMAC of the token).
+const INVITE_TTL_DAYS = 7;
+const MAX_INVITE_ATTEMPTS = 5;
+
+export async function createInviteLink(session: Session, targetId: string, ip: string | null) {
+  const admin = await requireTeamMember(session, targetId);
+  if (!admin.is_active) fail("VALIDATION_FAILED", "Reactivate the admin before creating a link");
+  if (admin.role === "owner" && admin.id !== session.adminId) fail("VALIDATION_FAILED", "Only the owner can reset the owner's password");
+  // Only the newest link works.
+  await db().from("otp_codes").update({ consumed_at: new Date().toISOString() })
+    .eq("admin_id", admin.id).eq("purpose", "invite").is("consumed_at", null);
+  const token = randomToken(32);
+  const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 86400_000);
+  await run(
+    db().from("otp_codes").insert({
+      admin_id: admin.id,
+      purpose: "invite",
+      code_hash: await hmacHex(`invite:${admin.id}:${token}`),
+      expires_at: expiresAt.toISOString(),
+      ip,
+    }),
+  );
+  const kind = admin.password_hash ? "reset" : "invite";
+  const link = `${getConfig().appUrl}/?invite=${admin.id}.${token}`;
+  let emailed = false;
+  let emailError: string | null = null;
+  try {
+    await sendMail(inviteMail({
+      to: admin.email,
+      link,
+      kind,
+      enterpriseName: session.enterpriseName,
+      inviter: session.fullName || session.email,
+      role: admin.role,
+      expiresAt,
+    }));
+    emailed = true;
+  } catch (e) {
+    emailError = e instanceof Error ? e.message : "Could not send email";
+    log("warn", "invite.email_failed", { target: admin.email, error: emailError });
+  }
+  await recordAudit({
+    enterpriseId: session.enterpriseId, adminId: session.adminId, category: "auth",
+    action: kind === "invite" ? "admin.invite_link_created" : "admin.reset_link_created",
+    params: { target: admin.email, emailed },
+  });
+  return { link, expiresAt: expiresAt.toISOString(), kind, email: admin.email, emailed, emailError };
+}
+
+/** Invited admin opens the link, sets a password, and is signed in. */
+export async function acceptInvite(input: { code: string; password: string; ip: string | null; userAgent: string | null }) {
+  const cfg = getConfig();
+  assertPasswordStrength(input.password);
+  const m = input.code.match(/^([0-9a-f-]{36})\.([A-Za-z0-9_-]{20,100})$/);
+  if (!m) fail("AUTH_INVITE_INVALID");
+  const [, adminId, token] = m;
+  const admin = await runMaybe<AdminRow>(db().from("admins").select("*").eq("id", adminId).maybeSingle());
+  if (!admin || !admin.is_active) fail("AUTH_INVITE_INVALID");
+  const row = await runMaybe<{ id: string; code_hash: string; attempts: number; expires_at: string }>(
+    db().from("otp_codes").select("id, code_hash, attempts, expires_at")
+      .eq("admin_id", admin.id).eq("purpose", "invite").is("consumed_at", null)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  );
+  if (!row || Date.parse(row.expires_at) < Date.now() || row.attempts >= MAX_INVITE_ATTEMPTS) fail("AUTH_INVITE_INVALID");
+  if (!safeEqual(await hmacHex(`invite:${admin.id}:${token}`), row.code_hash)) {
+    await db().from("otp_codes").update({ attempts: row.attempts + 1 }).eq("id", row.id);
+    fail("AUTH_INVITE_INVALID");
+  }
+  await db().from("otp_codes").update({ consumed_at: new Date().toISOString() }).eq("id", row.id);
+  const wasReset = Boolean(admin.password_hash);
+  await run(db().from("admins").update({ password_hash: await hashPassword(input.password) }).eq("id", admin.id));
+  // A password reset ends every other session of that admin.
+  if (wasReset) await db().from("sessions").update({ revoked_at: new Date().toISOString() }).eq("admin_id", admin.id).is("revoked_at", null);
+
+  const sessionToken = randomToken(32);
+  const expiresAt = new Date(Date.now() + cfg.sessionTtlHours * 3600_000);
+  await run(
+    db().from("sessions").insert({
+      admin_id: admin.id,
+      token_hash: await sha256Hex(sessionToken),
+      ip: input.ip,
+      user_agent: input.userAgent?.slice(0, 300),
+      expires_at: expiresAt.toISOString(),
+    }),
+  );
+  await db().from("admins").update({ last_login_at: new Date().toISOString() }).eq("id", admin.id);
+  await recordAudit({ enterpriseId: admin.enterprise_id, adminId: admin.id, category: "auth", action: wasReset ? "password.reset_by_link" : "admin.invite_accepted", params: { ip: input.ip } });
+  await noteLogin(admin, input.ip).catch(() => {});
+  return { token: sessionToken, expiresAt };
 }
 
 /** Confirmation codes for destructive commands reuse the OTP primitives. */
@@ -270,7 +427,7 @@ export async function resetPasswordWithOtp(input: {
 
   const otp = await runMaybe<{ id: string; code_hash: string; attempts: number; expires_at: string }>(
     db().from("otp_codes").select("id, code_hash, attempts, expires_at")
-      .eq("admin_id", admin.id).is("consumed_at", null)
+      .eq("admin_id", admin.id).is("consumed_at", null).neq("purpose", "invite")
       .order("created_at", { ascending: false }).limit(1).maybeSingle(),
   );
   if (!otp) fail("AUTH_INVALID_OTP");

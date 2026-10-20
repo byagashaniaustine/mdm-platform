@@ -5,6 +5,7 @@ export const ERROR_CATALOG = {
   AUTH_REQUIRED: { status: 401, message: "Sign in to continue.", retryable: false },
   AUTH_INVALID_OTP: { status: 401, message: "The code is incorrect.", retryable: false },
   AUTH_INVALID_CREDENTIALS: { status: 401, message: "Email or password is incorrect.", retryable: false },
+  AUTH_INVITE_INVALID: { status: 401, message: "This link is invalid, already used, or expired. Ask your enterprise owner for a new one.", retryable: false },
   AUTH_OTP_EXPIRED: { status: 401, message: "The code has expired. Request a new one.", retryable: false },
   AUTH_TOO_MANY_ATTEMPTS: { status: 429, message: "Too many attempts. Try again later.", retryable: false },
   AUTH_FORBIDDEN: { status: 403, message: "Your role does not allow this action.", retryable: false },
