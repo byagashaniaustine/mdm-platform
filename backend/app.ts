@@ -40,9 +40,12 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
     secureHeaders({
       contentSecurityPolicy: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'"],
-        imgSrc: ["'self'", "data:"],
+        // unpkg: Leaflet library (map on the Locations page).
+        scriptSrc: ["'self'", "https://unpkg.com"],
+        // 'unsafe-inline' is needed by Leaflet, which positions tiles via inline style="" attributes.
+        styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
+        // OpenStreetMap tile servers (a/b/c subdomains).
+        imgSrc: ["'self'", "data:", "blob:", "https://*.tile.openstreetmap.org"],
         connectSrc: ["'self'"],
         frameAncestors: ["'none'"],
         formAction: ["'self'"],
