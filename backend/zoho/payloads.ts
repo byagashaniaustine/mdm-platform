@@ -214,54 +214,12 @@ export const IOS_RESTRICTIONS: readonly RestrictionDef[] = [
   { kind: "binary", key: "allow_vpn_creation", label: "Add VPN configurations", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "binary", key: "allow_app_cellular_data", label: "Change mobile data settings for apps", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "boolean", key: "force_wifi_whitelisting", label: "Only join Wi-Fi networks sent by MDM", category: "network", recommended: false, supervised: true },
-  // -------------------------------------------------------- extra security
-  { kind: "binary", key: "allow_password_autofill", label: "Password AutoFill", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_password_proximity_request", label: "Request passwords from nearby devices", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_fingerprint_unlock", label: "Touch ID / Face ID unlock", category: "security", allow: true, restrict: false, recommended: "allow" },
-  { kind: "binary", key: "allow_lock_screen_control_center", label: "Control Center on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_lock_screen_notifications_view", label: "Notifications view on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_lock_screen_today_view", label: "Today view on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "force_automatic_date_time", label: "Force automatic date/time", category: "security", allow: true, restrict: false, recommended: "allow", supervised: true },
-  // ------------------------------------------------------------ more apps
-  { kind: "binary", key: "allow_app_clips", label: "App Clips", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_assistant_user_generated_content", label: "Siri user-generated content (web search)", category: "apps", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_assistant_while_locked", label: "Siri while locked", category: "apps", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_books_store", label: "Apple Books Store", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_books_store_erotica", label: "Explicit Apple Books content", category: "apps", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_music_service", label: "Apple Music", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_news", label: "Apple News", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_podcasts", label: "Podcasts", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_radio_service", label: "Apple Music radio", category: "apps", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_video_conferencing", label: "FaceTime video conferencing", category: "apps", allow: true, restrict: false, recommended: "allow" },
-  { kind: "binary", key: "allow_youtube", label: "YouTube", category: "apps", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_itunes", label: "iTunes Store", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  // ------------------------------------------------------------- more data
-  { kind: "binary", key: "allow_cloud_keychain_sync", label: "iCloud Keychain", category: "data", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_managed_apps_cloud_sync", label: "Managed apps store data in iCloud", category: "data", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_cloud_private_relay", label: "iCloud Private Relay", category: "data", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_shared_stream", label: "Shared Photo Stream", category: "data", allow: true, restrict: false, recommended: "restrict" },
-  { kind: "binary", key: "allow_shared_device_temporary_session", label: "Shared iPad temporary session", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_file_sharing", label: "Files app USB file sharing", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_remote_screen_observation", label: "Classroom screen observation", category: "data", allow: true, restrict: false, recommended: "allow", supervised: true },
-  // --------------------------------------------------------- more hardware
-  { kind: "binary", key: "allow_use_of_microphone", label: "Microphone", category: "hardware", allow: true, restrict: false, recommended: "allow" },
-  { kind: "binary", key: "allow_dictation", label: "Dictation (voice-to-text)", category: "hardware", allow: true, restrict: false, recommended: "allow", supervised: true },
-  { kind: "binary", key: "allow_personal_hotspot_modification", label: "Change Personal Hotspot settings", category: "hardware", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  // ---------------------------------------------------------- more network
-  { kind: "binary", key: "allow_auto_join_wifi", label: "Auto-join Wi-Fi networks", category: "network", allow: true, restrict: false, recommended: "allow" },
-  { kind: "binary", key: "allow_cellular_plan_modification", label: "Change cellular plan", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_esim_modification", label: "Change eSIM settings", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_definition_lookup", label: "Dictionary definition lookup", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
-  { kind: "binary", key: "allow_predictive_keyboard", label: "Predictive keyboard", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
-  { kind: "binary", key: "allow_spell_check", label: "Spell check", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
-  // ------------------------------------------------------ more settings/UI
-  { kind: "binary", key: "allow_wallpaper_modification", label: "Change wallpaper", category: "settings", allow: true, restrict: false, recommended: "allow", supervised: true },
-  { kind: "binary", key: "allow_find_my_friends_modification", label: "Change Find My Friends settings", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_notification_modification", label: "Change notification settings", category: "settings", allow: true, restrict: false, recommended: "allow", supervised: true },
-  { kind: "binary", key: "allow_pairing", label: "Pair with Mac/PC (iTunes/Finder)", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_system_app_removal", label: "Delete built-in system apps", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_remote_app_pairing", label: "Pair with Remote app", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
-  { kind: "binary", key: "allow_assistant_profanity", label: "Siri profanity filter", category: "settings", allow: false, restrict: true, recommended: "restrict", supervised: true, hint: "Enabled = profanity is filtered. Disable = Siri can say or recognise profanity." },
+  // NOTE: the ~40 additional iOS keys I speculatively added earlier this session
+  // (lock-screen, Siri sub-features, iCloud sub-services, pairing, cellular plan,
+  // Apple News/Books/Music, YouTube, etc.) are removed. Zoho rejected the whole
+  // payload with "Invalid parameter X detected" whenever any of them was ticked,
+  // so profile creation broke. Re-add individual keys only after confirming them
+  // against a live Zoho tenant.
 ];
 
 const RESTRICTION_BY_KEY = new Map(ANDROID_RESTRICTIONS.map((r) => [r.key, r] as const));
