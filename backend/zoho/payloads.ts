@@ -214,12 +214,96 @@ export const IOS_RESTRICTIONS: readonly RestrictionDef[] = [
   { kind: "binary", key: "allow_vpn_creation", label: "Add VPN configurations", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "binary", key: "allow_app_cellular_data", label: "Change mobile data settings for apps", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "boolean", key: "force_wifi_whitelisting", label: "Only join Wi-Fi networks sent by MDM", category: "network", recommended: false, supervised: true },
-  // NOTE: the ~40 additional iOS keys I speculatively added earlier this session
-  // (lock-screen, Siri sub-features, iCloud sub-services, pairing, cellular plan,
-  // Apple News/Books/Music, YouTube, etc.) are removed. Zoho rejected the whole
-  // payload with "Invalid parameter X detected" whenever any of them was ticked,
-  // so profile creation broke. Re-add individual keys only after confirming them
-  // against a live Zoho tenant.
+
+  // ================== Additional keys verified against MDM_Dev_Guide.pdf ==================
+  // All names below are copied verbatim from the dev guide's RESTRICTIONS_POLICY table.
+  // Default per the guide is almost always true (allowed); recommendation is my call.
+
+  // ----- security / privacy
+  { kind: "binary", key: "allow_touch_id", label: "Touch ID / Face ID to unlock", category: "security", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_password_autofill", label: "Password AutoFill in Safari and apps", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_password_proximity", label: "Request passwords from nearby devices", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_manade_write_unmanaged_contact", label: "Managed contacts can be stored in unmanaged accounts", category: "security", allow: true, restrict: false, recommended: "restrict", hint: "Guide spells it 'manade' — don't correct it." },
+  { kind: "binary", key: "allow_unmanaged_read_managed_contact", label: "Unmanaged apps can read managed contacts", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_enabling_restriction", label: "User can enable Restrictions / Screen Time", category: "security", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_ota_pki_updates", label: "Automatic updates of trusted certificates", category: "security", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_limited_ad_tracking", label: "Force limited ad tracking", category: "security", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_diagnostic_submission", label: "Send diagnostics to Apple", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_diag_sub_modification", label: "Modify Diagnostics & Usage settings", category: "security", allow: true, restrict: false, recommended: "restrict" },
+
+  // ----- apps
+  { kind: "binary", key: "allow_use_of_youtube", label: "YouTube app", category: "apps", allow: true, restrict: false, recommended: "allow", hint: "Guide notes this is deprecated on newer iOS, but still accepted." },
+  { kind: "binary", key: "allow_itunes", label: "iTunes Store", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_music_service", label: "Apple Music", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_radio_service", label: "Apple Music radio", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_news", label: "Apple News", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_podcasts", label: "Podcasts", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_use_of_ibookstore", label: "iBooks Store", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_managed_book_sync", label: "Enterprise book metadata sync", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_managed_book_backup", label: "Backup enterprise books", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_ibookstore_erotica_media", label: "Explicit iBooks content", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_explicit_content", label: "Explicit music & podcasts", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_managed_app_trust", label: "Trust unauthorized enterprise apps", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_auto_app_download", label: "Auto-download apps across devices (same Apple ID)", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_activity_continuation", label: "Handoff", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_multiplayer_gaming", label: "Multiplayer gaming", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_add_game_center_friend", label: "Add Game Center friends", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_istore_pwd_entry", label: "Always require password for App Store / iTunes", category: "apps", allow: true, restrict: false, recommended: "allow" },
+
+  // ----- Siri
+  { kind: "binary", key: "allow_assistant_user_content", label: "Siri can query the web", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_assistant_when_locked", label: "Siri while locked", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "force_assist_profanity_filter", label: "Siri profanity filter", category: "apps", allow: true, restrict: false, recommended: "allow", supervised: true },
+
+  // ----- Safari
+  { kind: "binary", key: "safari_allow_popups", label: "Safari pop-ups", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "safari_allow_javascript", label: "Safari JavaScript", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "safari_allow_autofill", label: "Safari AutoFill", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "safari_force_fraud_warning", label: "Fraudulent website warning", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "enum", key: "safari_accept_cookies", label: "Safari cookies", category: "apps", options: [{ value: 0, label: "Never" }, { value: 1, label: "From visited sites" }, { value: 2, label: "Always" }], recommended: 1 },
+
+  // ----- data / iCloud
+  { kind: "binary", key: "allow_cloud_keychain_sync", label: "iCloud Keychain", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_managed_app_cloud_sync", label: "Managed apps sync to iCloud", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_shared_stream", label: "Shared Photo Stream", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_photo_stream", label: "iCloud Photo Stream", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_sync_while_roaming", label: "Auto-sync while roaming", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "force_airdrop_unmanaged", label: "AirDrop from managed apps", category: "data", allow: true, restrict: false, recommended: "restrict" },
+
+  // ----- settings / UI
+  { kind: "binary", key: "show_control_center", label: "Control Center on lock screen", category: "settings", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "show_today_view", label: "Today view on lock screen", category: "settings", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "show_notification_center", label: "Notification Center on lock screen", category: "settings", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_passbook_when_locked", label: "Wallet/Passbook on lock screen", category: "settings", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_auto_correction", label: "Auto-Correction", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_predictive_keyboard", label: "Predictive keyboard", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_spellcheck", label: "Spell check", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_dictation", label: "Dictation", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_dictionary_lookup", label: "Dictionary definition lookup", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_voice_dialing", label: "Voice Dial", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_keyboard_shortcut", label: "External keyboard shortcuts", category: "settings", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_find_my_friends_mod", label: "Change Find My Friends", category: "settings", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_spotlight_result", label: "Spotlight internet search", category: "settings", allow: true, restrict: false, recommended: "allow" },
+
+  // ----- AirPrint / AirPlay / Watch
+  { kind: "binary", key: "allow_airprint", label: "AirPrint", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_airprint_credential_storage", label: "AirPrint credentials in iCloud Keychain", category: "network", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_airprint_ibeacon_discovery", label: "AirPrint iBeacon discovery", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_airprint_tls", label: "AirPrint TLS trust required", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_airplay_incoming_pwd", label: "Password for incoming AirPlay", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_airplay_outgoing_pwd", label: "Password for outgoing AirPlay", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_paired_watch", label: "Pair with Apple Watch", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_watch_wrist_detect", label: "Apple Watch wrist detection", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "enum", key: "bluetooth_setting", label: "Bluetooth state", category: "network", options: [{ value: 0, label: "Off" }, { value: 1, label: "On" }, { value: 2, label: "Not configured" }], recommended: 2 },
+
+  // ----- Classroom
+  { kind: "binary", key: "allow_classroom_remoteview", label: "Classroom AirPlay / screen view by teacher", category: "data", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "force_classroom_remoteview", label: "Force Classroom AirPlay without prompt", category: "data", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "force_classroom_appdevicelock", label: "Teacher can lock apps without prompt", category: "data", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "force_classroom_auto_join", label: "Auto-join Classroom without prompt", category: "data", allow: true, restrict: false, recommended: "allow", supervised: true },
+
+  // ----- ratings
+  { kind: "boolean", key: "is_rating_enabled", label: "Enable ratings by region", category: "apps", recommended: true },
 ];
 
 const RESTRICTION_BY_KEY = new Map(ANDROID_RESTRICTIONS.map((r) => [r.key, r] as const));
