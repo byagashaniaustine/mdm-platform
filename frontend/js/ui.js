@@ -71,13 +71,24 @@ export function toast(message, tone = "ok") {
     host = h("div", { id: "toasts", class: "toasts", role: "status", "aria-live": "polite" });
     document.body.append(host);
   }
-  const t = h("div", { class: `toast toast-${tone}` }, message);
+  // Bad toasts stick until clicked (debug-friendly). Others auto-dismiss in ~5s.
+  const sticky = tone === "bad" || tone === "warn";
+  const closeBtn = sticky ? h("button", { class: "toast-close", "aria-label": "Dismiss", type: "button" }, "✕") : null;
+  const t = h("div", { class: `toast toast-${tone}${sticky ? " toast-sticky" : ""}` }, message, closeBtn);
   host.append(t);
-  setTimeout(() => t.classList.add("toast-out"), 4200);
-  setTimeout(() => t.remove(), 4700);
+  if (sticky) {
+    const dismiss = () => { t.classList.add("toast-out"); setTimeout(() => t.remove(), 400); };
+    t.addEventListener("click", dismiss);
+    closeBtn?.addEventListener("click", (e) => { e.stopPropagation(); dismiss(); });
+  } else {
+    setTimeout(() => t.classList.add("toast-out"), 4200);
+    setTimeout(() => t.remove(), 4700);
+  }
 }
 
 export function toastError(err) {
+  // Log the full error to the dev console so debugging doesn't rely on catching the toast.
+  console.error("toastError:", err);
   toast(`${err.message}${err.code && !String(err.code).startsWith("HTTP") ? ` (${err.code})` : ""}`, "bad");
 }
 
