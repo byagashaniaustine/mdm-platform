@@ -233,9 +233,11 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
       assert.equal(actionAppliesTo(a, unknown), true, `${a} unknown is let through`);
     }
     for (const a of ["lock", "complete_wipe", "clear_passcode", "scan", "fetch_location"]) assert.equal(actionAppliesTo(a, unsup), true, a);
-    // Apple MDM can't set a passcode on iOS (only clear it), supervised or not.
-    assert.equal(actionAppliesTo("reset_passcode", unsup), false);
-    assert.equal(actionAppliesTo("reset_passcode", { ...unsup, is_supervised: true }), false);
+    // Apple MDM can't set a passcode on iOS (only clear it), supervised or not —
+    // not even when supervision is still unknown. Lock in all three cases so a
+    // future refactor can't quietly re-enable it.
+    for (const d of [sup, unsup, unknown]) assert.equal(actionAppliesTo("reset_passcode", d), false, "reset_passcode iOS");
+    assert.equal(actionAppliesTo("reset_passcode", { platform: "android", is_knox: false, is_supervised: null }), true);
     assert.equal(actionAppliesTo("pause_kiosk", sup), false);
     // Android unaffected by the iOS rule
     assert.equal(actionAppliesTo("enable_lost_mode", { platform: "android", is_knox: false, is_supervised: false }), true);

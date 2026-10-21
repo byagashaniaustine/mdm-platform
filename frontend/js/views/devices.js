@@ -274,6 +274,9 @@ export async function deviceDetailView(el, ctx, id) {
         danger.length ? h("section", { class: "card danger-zone" },
           h("div", { class: "card-head" }, h("h2", {}, "Destructive actions")),
           h("p", { class: "muted small" }, `Each asks you to type the last 4 characters of the ${d.confirm_tag?.source ?? "serial number"}, so two phones with the same name can't be mixed up.`),
+          d.platform === "ios"
+            ? h("p", { class: "muted small" }, "Apple doesn't let an MDM set a specific passcode on iPhone or iPad. To change the user's passcode, use Clear passcode and apply a Passcode profile to the device's group — the user is then prompted to pick a new one that meets the policy.")
+            : null,
           h("div", { class: "btn-row" }, danger.map((a) => h("button", { class: "btn btn-sm btn-danger", type: "button", onclick: () => runAction(d, a, reload) }, a.label))),
         ) : null,
       ),
