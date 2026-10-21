@@ -404,10 +404,8 @@ function profileWizard(el, ctx, catalog, existing) {
   };
   function renderIosKiosk() {
     const mode = select([{ value: "single", label: "Single app" }, { value: "multi", label: "Multiple apps" }]);
-    // Same shape as Android kiosk: checkbox list fed from the Zoho app repo + manual-add rows.
     const appsBox = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading apps from Zoho…"));
     const picks = [];
-    let nextManualId = 1;
     const modeHint = h("p", { class: "muted small" }, "Pick the apps allowed to run in kiosk.");
     const refreshHint = () => {
       modeHint.textContent = mode.value === "single"
@@ -417,85 +415,38 @@ function profileWizard(el, ctx, catalog, existing) {
     mode.addEventListener("change", refreshHint);
     refreshHint();
 
-    const manualRow = () => {
-      const id = `manual-ios-${Date.now()}-${nextManualId++}`;
-      const name = input({ placeholder: "App display name" });
-      const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos" });
-      const row = h("div", { class: "kiosk-app" },
-        h("span", {}, "✱ manual"),
-        name,
-        pkg,
-        h("button", { class: "btn btn-xs", type: "button", onclick: () => { picks.splice(picks.findIndex((p) => p.a.app_id === id), 1); row.remove(); } }, "Remove"),
-      );
-      picks.push({ a: { app_id: id, app_name: null }, cb: { checked: true }, pkg, name, manual: true });
-      return row;
-    };
-    const addManual = h("button", { class: "btn btn-sm", type: "button", onclick: () => appsBox.appendChild(manualRow()) }, "+ Add bundle manually");
-
-    const renderRepoRows = (apps) => apps.map((a) => {
+    // iOS kiosk requires Zoho's numeric app_id — NOT a bundle identifier — per the
+    // applockpolicy spec. So only apps uploaded to the Zoho app repo work; the
+    // common-apps catalog, enrolled-devices scan and manual-bundle add used
+    // elsewhere don't apply here (none of them carries a Zoho app_id).
+    const renderRepoRow = (a) => {
       const cb = h("input", { type: "checkbox" });
-      const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
-      picks.push({ a, cb, pkg, manual: false });
-      return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
-    });
-    const renderInstalledRows = (apps) => apps.map((a) => {
-      const cb = h("input", { type: "checkbox" });
-      const pkg = input({ placeholder: "bundle identifier", value: a.identifier ?? "" });
-      picks.push({ a: { app_id: `installed-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
+      cb.addEventListener("change", () => { if (cb.checked) enforceSingle(cb); });
+      picks.push({ a, cb });
       return h("div", { class: "kiosk-app" },
-        h("label", { class: "pick" }, cb, h("span", {}, a.app_name, h("span", { class: "muted small" }, ` · on ${a.devices} device${a.devices === 1 ? "" : "s"}`))),
-        pkg,
+        h("label", { class: "pick" }, cb, h("span", {}, a.app_name, h("span", { class: "muted small" }, ` · app_id ${a.app_id}`))),
       );
-    });
-    const renderCommonRows = (apps) => apps.map((a) => {
-      const cb = h("input", { type: "checkbox" });
-      const pkg = input({ placeholder: "bundle identifier", value: a.identifier });
-      picks.push({ a: { app_id: `common-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
-      return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
-    });
-    const commonSection = () => h("div", { class: "stack" },
-      h("h4", { class: "section-head" }, "common apps"),
-      ...renderCommonRows(COMMON_IOS_APPS),
-    );
+    };
 
-    get("/api/apps").then(async (apps) => {
+    get("/api/apps").then((apps) => {
       const ios = (apps ?? []).filter((a) => Number(a.platform_type) === 1);
       if (ios.length) {
-        clear(appsBox, ...renderRepoRows(ios), commonSection(), addManual);
+        clear(appsBox, ...ios.map(renderRepoRow));
         return;
       }
-      // Zoho repo empty → try to scan enrolled devices, then fall back to the built-in catalog.
-      clear(appsBox, h("p", { class: "muted" }, "Zoho app repo is empty. Scanning enrolled devices…"));
-      try {
-        const installed = await get("/api/apps/installed?platform=1");
-        if (installed?.length) {
-          clear(appsBox,
-            h("p", { class: "muted small" }, "Showing apps installed on your enrolled iPhones/iPads."),
-            ...renderInstalledRows(installed),
-            commonSection(),
-            addManual,
-          );
-        } else {
-          clear(appsBox,
-            h("p", { class: "muted small" }, "Zoho's app repo is empty and no installed apps were reported from enrolled iPhones/iPads (common for unsupervised iOS). Pick from the common apps below, or add a bundle manually."),
-            commonSection(),
-            addManual,
-          );
-        }
-      } catch (err) {
-        clear(appsBox,
-          h("p", { class: "muted small" }, "Could not scan enrolled devices. Pick from the common apps below, or add a bundle manually."),
-          commonSection(),
-          addManual,
-        );
-        toastError(err);
-      }
-    }).catch((err) => {
       clear(appsBox,
-        h("p", { class: "muted" }, "Could not load apps from Zoho. Pick from the common apps below, or add a bundle manually."),
-        commonSection(),
-        addManual,
+        h("div", { class: "banner banner-warn" },
+          h("div", {},
+            h("strong", {}, "iOS kiosk needs apps from the Zoho app repo. "),
+            "Zoho's applockpolicy requires a numeric app_id (not just a bundle identifier). ",
+            "Upload the kiosk app to Zoho first — ",
+            h("em", {}, "ManageEngine MDM console → Device Mgmt → App Repository → Add App → iOS"),
+            " — then reload this form and the uploaded app(s) will appear here.",
+          ),
+        ),
       );
+    }).catch((err) => {
+      clear(appsBox, h("p", { class: "muted" }, "Could not load apps from Zoho."));
       toastError(err);
     });
 
@@ -549,10 +500,7 @@ function profileWizard(el, ctx, catalog, existing) {
       ),
     );
     collect = () => {
-      // Dedup by bundle: same identifier picked in two sections (e.g. installed + common) → one entry.
-      const chosen = [...new Set(picks
-        .filter((p) => p.cb.checked && p.pkg.value.trim())
-        .map((p) => p.pkg.value.trim()))];
+      const chosen = picks.filter((p) => p.cb.checked);
       if (mode.value === "single" && chosen.length !== 1) {
         throw Object.assign(new Error("Single-app kiosk needs exactly one app picked"), { code: "VALIDATION_FAILED" });
       }
@@ -561,18 +509,21 @@ function profileWizard(el, ctx, catalog, existing) {
       }
       return {
         mode: mode.value,
-        bundleIdentifier: mode.value === "single" ? chosen[0] : undefined,
-        bundleIdentifiers: mode.value === "multi" ? chosen : undefined,
+        apps: chosen.map((p) => ({
+          appId: String(p.a.app_id),
+          displayName: p.a.app_name ?? String(p.a.app_id),
+          isSystemApp: false,
+        })),
         disableTouch: disableTouch.checked,
         disableDeviceRotation: disableRotation.checked,
         disableVolumeButtons: disableVolume.checked,
         disableRingerSwitch: disableRinger.checked,
-        disableSleepWakeButton: disableSleep.checked,
+        disableSleepButton: disableSleep.checked,
         disableAutoLock: disableAutoLock.checked,
-        enableVoiceOver: voiceOver.checked,
-        enableZoom: zoom.checked,
-        enableInvertColors: invert.checked,
-        enableAssistiveTouch: assistive.checked,
+        voiceOver: voiceOver.checked,
+        zoom: zoom.checked,
+        invertColors: invert.checked,
+        asstTouch: assistive.checked,
         enableSpeakSelection: speakSel.checked,
         enableMonoAudio: monoAudio.checked,
       };

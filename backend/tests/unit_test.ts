@@ -275,17 +275,23 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     assert.deepEqual(buildR({ allow_camera: "restrict" }), { allow_camera: 2 });
   });
 
-  Deno.test("iOS kiosk routes to applockpolicy, validates bundle ids", () => {
-    const single = buildPayload("ios", "kiosk", { mode: "single", bundleIdentifier: "com.acme.pos" });
+  Deno.test("iOS kiosk routes to applockpolicy with guide field shape", () => {
+    const single = buildPayload("ios", "kiosk", { mode: "single", apps: [{ appId: "9007199254741861", displayName: "POS" }] });
     assert.equal(single.name, "applockpolicy");
-    assert.equal((single.body as Record<string, unknown>).kiosk_mode, 0);
-    assert.equal((single.body as Record<string, unknown>).bundle_identifier, "com.acme.pos");
-    const multi = buildIosKioskPayload({ mode: "multi", bundleIdentifiers: ["com.acme.a", "com.acme.b"] });
-    assert.equal(multi.kiosk_mode, 1);
-    assert.deepEqual(JSON.parse(multi.bundle_identifiers as string), ["com.acme.a", "com.acme.b"]);
-    assert.throws(() => buildIosKioskPayload({ mode: "single" }));
-    assert.throws(() => buildIosKioskPayload({ mode: "single", bundleIdentifier: "has spaces" }));
-    assert.throws(() => buildIosKioskPayload({ mode: "multi", bundleIdentifiers: [] }));
+    assert.equal((single.body as Record<string, unknown>).kiosk_mode, 1); // 1 = single per guide
+    assert.equal((single.body as Record<string, unknown>).disable_auto_lock, true);
+    const sApps = JSON.parse((single.body as Record<string, string>).allowed_apps);
+    assert.deepEqual(sApps, [{ app_id: 9007199254741861, is_system_app: false, group_display_name: "POS" }]);
+    const multi = buildIosKioskPayload({ mode: "multi", apps: [{ appId: 111, displayName: "A" }, { appId: 222 }] });
+    assert.equal(multi.kiosk_mode, 2); // 2 = multi
+    assert.equal((multi as Record<string, unknown>).allowed_apps, undefined);
+    assert.deepEqual(JSON.parse(multi.autonomous_kiosk_apps as string), [
+      { app_id: 111, is_system_app: false, group_display_name: "A" },
+      { app_id: 222, is_system_app: false, group_display_name: "222" },
+    ]);
+    assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [] }));
+    assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [{ appId: 1 }, { appId: 2 }] }));
+    assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [{ appId: "com.not-numeric" }] }));
   });
 
   Deno.test("iOS Wi-Fi payload requires password for encrypted networks", () => {

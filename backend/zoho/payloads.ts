@@ -544,58 +544,67 @@ export function buildFrpPayload(accounts: { emailUserId: string; email: string }
 }
 
 // --------------------------------------------------------------- iOS kiosk
+/** One entry in `allowed_apps` / `autonomous_kiosk_apps` per the applockpolicy guide table.
+ *  app_id is Zoho's numeric app_id from /apps (NOT a bundle identifier).
+ *  Bundle-id-only sources (common-apps catalog, installed-apps scan) can't be used here —
+ *  the app has to be uploaded to the Zoho app repo first so it has an app_id. */
+export type IosKioskApp = { appId: string | number; isSystemApp?: boolean; displayName?: string };
+
 /**
- * iOS kiosk (`singleappmodepolicy`, supervised only).
- * Single-app mode locks the device to one app. Multi-app mode is implemented
- * via Apple's Autonomous Single App Mode (apps on the list can enter/exit kiosk).
+ * iOS kiosk (`applockpolicy`, supervised only). Field names and structure verbatim
+ * from MDM_Dev_Guide.pdf line 14237, APPLOCK_POLICY table.
  */
 export function buildIosKioskPayload(input: {
   mode: "single" | "multi";
-  bundleIdentifier?: string; // single: the one app to lock to
-  bundleIdentifiers?: string[]; // multi: apps allowed to run in kiosk
+  apps: IosKioskApp[];
   disableTouch?: boolean;
   disableDeviceRotation?: boolean;
   disableVolumeButtons?: boolean;
   disableRingerSwitch?: boolean;
-  disableSleepWakeButton?: boolean;
+  disableSleepButton?: boolean;
   disableAutoLock?: boolean;
-  enableVoiceOver?: boolean;
-  enableZoom?: boolean;
-  enableInvertColors?: boolean;
-  enableAssistiveTouch?: boolean;
+  voiceOver?: boolean;
+  zoom?: boolean;
+  invertColors?: boolean;
+  asstTouch?: boolean;
   enableSpeakSelection?: boolean;
   enableMonoAudio?: boolean;
 }) {
-  const pkg = (s: string) => /^[a-zA-Z][\w.-]+$/.test(s);
-  if (input.mode === "single") {
-    if (!input.bundleIdentifier || !pkg(input.bundleIdentifier)) {
-      fail("VALIDATION_FAILED", "Single-app kiosk needs a bundle identifier (e.g. com.acme.pos)");
+  if (!input.apps.length) fail("VALIDATION_FAILED", "iOS kiosk needs at least one app");
+  if (input.mode === "single" && input.apps.length !== 1) fail("VALIDATION_FAILED", "Single-app kiosk takes exactly one app");
+  for (const a of input.apps) {
+    if (!a.appId || !/^\d+$/.test(String(a.appId))) {
+      fail("VALIDATION_FAILED", `iOS kiosk needs the numeric app_id from the Zoho app repo. '${a.appId}' isn't one. Upload the app to Zoho first.`);
     }
-    return {
-      kiosk_mode: 0, // 0 single, 1 multi
-      bundle_identifier: input.bundleIdentifier,
-      disable_touch: input.disableTouch ?? false,
-      disable_device_rotation: input.disableDeviceRotation ?? false,
-      disable_volume_buttons: input.disableVolumeButtons ?? false,
-      disable_ringer_switch: input.disableRingerSwitch ?? false,
-      disable_sleep_wake_button: input.disableSleepWakeButton ?? false,
-      disable_auto_lock: input.disableAutoLock ?? true,
-      enable_voice_over: input.enableVoiceOver ?? false,
-      enable_zoom: input.enableZoom ?? false,
-      enable_invert_colors: input.enableInvertColors ?? false,
-      enable_assistive_touch: input.enableAssistiveTouch ?? false,
-      enable_speak_selection: input.enableSpeakSelection ?? false,
-      enable_mono_audio: input.enableMonoAudio ?? false,
-    };
   }
-  const ids = (input.bundleIdentifiers ?? []).map((s) => s.trim()).filter(Boolean);
-  if (!ids.length) fail("VALIDATION_FAILED", "Multi-app kiosk needs at least one bundle identifier");
-  for (const id of ids) if (!pkg(id)) fail("VALIDATION_FAILED", `Invalid bundle identifier ${id}`);
-  return {
-    kiosk_mode: 1,
-    bundle_identifiers: JSON.stringify(ids),
+  const appsJson = JSON.stringify(input.apps.map((a) => ({
+    app_id: Number(a.appId),
+    is_system_app: a.isSystemApp ?? false,
+    group_display_name: a.displayName ?? String(a.appId),
+  })));
+  // Guide: kiosk_mode is 1 (single) or 2 (multi).
+  const base: Record<string, unknown> = {
+    kiosk_mode: input.mode === "single" ? 1 : 2,
     disable_auto_lock: input.disableAutoLock ?? true,
   };
+  if (input.mode === "single") {
+    // Guide: all the toggle fields below are "Applicable only for kiosk_mode 1".
+    base.allowed_apps = appsJson;
+    base.disable_touch = input.disableTouch ?? false;
+    base.disable_device_rotation = input.disableDeviceRotation ?? false;
+    base.disable_volume_buttons = input.disableVolumeButtons ?? false;
+    base.disable_ringer_switch = input.disableRingerSwitch ?? false;
+    base.disable_sleep_button = input.disableSleepButton ?? false;
+    base.voice_over = input.voiceOver ?? false;
+    base.zoom = input.zoom ?? false;
+    base.invert_colors = input.invertColors ?? false;
+    base.asst_touch = input.asstTouch ?? false;
+    base.enable_speak_selection = input.enableSpeakSelection ?? false;
+    base.enable_mono_audio = input.enableMonoAudio ?? false;
+  } else {
+    base.autonomous_kiosk_apps = appsJson;
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------- iOS Wi-Fi
