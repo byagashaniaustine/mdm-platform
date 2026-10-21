@@ -163,17 +163,34 @@ function profileWizard(el, ctx, catalog, existing) {
       const picks = [];
       let nextManualId = 1;
 
+      // Single mode = pick exactly one; ticking a second unchecks the first (radio-like).
+      const enforceSingle = (justChecked) => {
+        if (mode.value !== "single") return;
+        for (const p of picks) if (p.cb !== justChecked && p.cb.checked) p.cb.checked = false;
+      };
+      mode.addEventListener("change", () => {
+        if (mode.value !== "single") return;
+        let keptOne = false;
+        for (const p of picks) {
+          if (!p.cb.checked) continue;
+          if (keptOne) p.cb.checked = false;
+          else keptOne = true;
+        }
+      });
+
       const manualRow = () => {
         const id = `manual-${Date.now()}-${nextManualId++}`;
         const name = input({ placeholder: "App display name" });
         const pkg = input({ placeholder: "package name, e.g. com.acme.pos" });
+        const cb = { checked: true };
         const row = h("div", { class: "kiosk-app" },
           h("span", {}, "✱ manual"),
           name,
           pkg,
           h("button", { class: "btn btn-xs", type: "button", onclick: () => { picks.splice(picks.findIndex((p) => p.a.app_id === id), 1); row.remove(); } }, "Remove"),
         );
-        picks.push({ a: { app_id: id, app_name: null }, cb: { checked: true }, pkg, name, manual: true });
+        picks.push({ a: { app_id: id, app_name: null }, cb, pkg, name, manual: true });
+        if (mode.value === "single") enforceSingle(cb);
         return row;
       };
 
@@ -182,12 +199,18 @@ function profileWizard(el, ctx, catalog, existing) {
       get("/api/apps").then((apps) => {
         const android = apps.filter((a) => Number(a.platform_type) === 2 || a.platform_type === undefined);
         if (android.length) {
-          clear(appsBox, ...android.map((a) => {
-            const cb = h("input", { type: "checkbox" });
-            const pkg = input({ placeholder: "package name, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
-            picks.push({ a, cb, pkg, manual: false });
-            return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
-          }), addManual);
+          const list = filterableList(android, {
+            search: (a) => `${a.app_name ?? ""} ${a.bundle_identifier ?? a.identifier ?? ""}`,
+            empty: "No apps match that search.",
+            render: (a) => {
+              const cb = h("input", { type: "checkbox" });
+              cb.addEventListener("change", () => { if (cb.checked) enforceSingle(cb); });
+              const pkg = input({ placeholder: "package name, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
+              picks.push({ a, cb, pkg, manual: false });
+              return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
+            },
+          });
+          clear(appsBox, list, addManual);
         } else {
           clear(appsBox,
             h("p", { class: "muted small" }, "The Zoho app repository is empty. Upload the kiosk app there, OR add it below by its Android package name (works if the app is already installed on the device)."),
