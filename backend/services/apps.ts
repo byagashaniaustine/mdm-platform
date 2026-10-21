@@ -98,28 +98,38 @@ export async function groupInstalledApps(s: Session, groupId: string) {
  * Union of apps installed across every enrolled device in the enterprise.
  * Used by the kiosk picker to offer real options when the Zoho app repo is empty.
  * Dedupes by identifier and carries a `devices` count for UX ("installed on 7
- * devices"). Pass `platformType` (1=iOS, 2=Android) to filter.
+ * devices"). Pass `platformType` (1=iOS, 2=Android) to filter at the DEVICE level —
+ * Zoho's installed_apps[] entries don't reliably carry a per-app platform_type.
  */
 export async function enterpriseInstalledApps(s: Session, platformType?: number) {
+  const platformKey = platformType === 1 ? "ios" : platformType === 2 ? "android" : null;
   type Row = { zoho_device_id: string | null };
-  const rows = await run<Row[]>(
-    db().from("devices").select("zoho_device_id")
-      .eq("enterprise_id", s.enterpriseId).eq("is_removed", false).not("zoho_device_id", "is", null),
-  );
+  let q = db().from("devices").select("zoho_device_id")
+    .eq("enterprise_id", s.enterpriseId).eq("is_removed", false).not("zoho_device_id", "is", null);
+  if (platformKey) q = q.eq("platform", platformKey);
+  const rows = await run<Row[]>(q);
   const zohoIds = rows.map((r) => r.zoho_device_id).filter((x): x is string => !!x);
-  if (!zohoIds.length) return [] as { identifier: string; app_name: string; platform_type: string; app_version?: string; devices: number }[];
+  if (!zohoIds.length) {
+    const { log } = await import("../lib/log.ts");
+    log("info", "installed_apps.no_devices", { enterprise_id: s.enterpriseId, platform: platformKey });
+    return [] as { identifier: string; app_name: string; platform_type: string; app_version?: string; devices: number }[];
+  }
 
   type App = { identifier?: string; app_name?: string; platform_type?: string | number; app_version?: string };
   const seen = new Map<string, { identifier: string; app_name: string; platform_type: string; app_version?: string; devices: number }>();
+  let fetchErrors = 0;
+  let fetchOk = 0;
   // 3-at-a-time, same rate-limit shape as groupInstalledApps.
   for (let i = 0; i < zohoIds.length; i += 3) {
     const chunk = zohoIds.slice(i, i + 3);
     const batches = await Promise.all(chunk.map(async (zid) => {
       try {
         const resp = await zoho.listDeviceApps(s.enterpriseId, zid);
+        fetchOk += 1;
         const list = (resp as { installed_apps?: App[] }).installed_apps ?? [];
         return Array.isArray(list) ? list : [];
       } catch {
+        fetchErrors += 1;
         return [] as App[];
       }
     }));
@@ -127,19 +137,21 @@ export async function enterpriseInstalledApps(s: Session, platformType?: number)
       for (const a of apps) {
         const id = a.identifier;
         if (!id) continue;
-        const pt = String(a.platform_type ?? "");
-        if (platformType !== undefined && Number(pt) !== platformType) continue;
         const existing = seen.get(id);
         if (existing) existing.devices += 1;
         else seen.set(id, {
           identifier: id,
           app_name: a.app_name ?? id,
-          platform_type: pt,
+          platform_type: String(a.platform_type ?? platformType ?? ""),
           app_version: a.app_version,
           devices: 1,
         });
       }
     }
+  }
+  if (!seen.size) {
+    const { log } = await import("../lib/log.ts");
+    log("info", "installed_apps.empty", { enterprise_id: s.enterpriseId, platform: platformKey, devices_total: zohoIds.length, fetch_ok: fetchOk, fetch_errors: fetchErrors });
   }
   return [...seen.values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
 }

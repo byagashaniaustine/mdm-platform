@@ -212,7 +212,7 @@ function profileWizard(el, ctx, catalog, existing) {
             );
           } else {
             clear(appsBox,
-              h("p", { class: "muted small" }, "The Zoho app repository is empty and no enrolled Android devices report installed apps yet. Upload a kiosk app to Zoho, OR add a package name manually below (works if the app is already on the device)."),
+              h("p", { class: "muted small" }, "No Android apps found in the Zoho repository or on enrolled devices. If you have enrolled devices, open one from Devices → Fetch installed apps so Zoho picks up what's actually installed. Or add a package name manually below:"),
               addManual,
             );
           }
@@ -430,7 +430,7 @@ function profileWizard(el, ctx, catalog, existing) {
           );
         } else {
           clear(appsBox,
-            h("p", { class: "muted small" }, "No iOS apps in the Zoho repository and no enrolled iPhones/iPads report installed apps yet. Add a bundle identifier manually below (works if the app is already on the device)."),
+            h("p", { class: "muted small" }, "No iOS apps found in the Zoho repository or on enrolled iPhones/iPads. If you have enrolled devices, open one from Devices → Fetch installed apps so Zoho picks up what's actually installed. Or add a bundle identifier manually below:"),
             addManual,
           );
         }
