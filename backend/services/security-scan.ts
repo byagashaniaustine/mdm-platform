@@ -10,7 +10,20 @@ type Json = Record<string, unknown>;
 type Device = { id: string; zoho_device_id: number; device_name: string | null };
 type Snapshot = { data_total: number | null; data_rate_baseline: number | null; data_samples: number; captured_at: string };
 
-const asBool = (v: unknown): boolean | null => (v === true || v === false ? v : null);
+// Zoho returns these fields as booleans sometimes, strings ("true"/"false") other times,
+// occasionally as 0/1 numbers. Previous version only accepted strict JS booleans and
+// silently null'd the rest — so is_supervised stayed null forever after sync even on
+// supervised iPhones that Zoho reports as "true".
+const asBool = (v: unknown): boolean | null => {
+  if (v === true || v === false) return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true") return true;
+    if (s === "false") return false;
+  }
+  if (typeof v === "number") return v !== 0;
+  return null;
+};
 const num = (v: unknown): number | null => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
 
 /** Pure evaluation (unit-tested): which conditions are true for this device right now. */
