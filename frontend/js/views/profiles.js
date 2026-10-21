@@ -25,14 +25,20 @@ export async function profilesView(el, ctx) {
             h("td", { class: "muted" }, ago(p.updated_at)),
             h("td", { class: "actions" },
               h("button", { class: "btn btn-sm", type: "button", onclick: () => viewProfile(ctx, catalog, p.id) }, "View"),
-              admin && p.state !== "published" ? h("button", { class: "btn btn-sm btn-primary", type: "button", onclick: async () => {
-                try {
-                  toastEvent(await post(`/api/profiles/${p.id}/publish`, {}), "Published");
-                  profilesView(el, ctx);
-                } catch (err) {
-                  toastError(err);
-                }
-              } }, p.state === "modified" ? "Re-publish" : "Publish") : null,
+              admin && p.state !== "published" ? h("button", {
+                class: "btn btn-sm btn-primary",
+                type: "button",
+                disabled: !(p.payload_names ?? []).length || undefined,
+                title: !(p.payload_names ?? []).length ? "Add a policy first — this draft has no payloads attached." : "",
+                onclick: async () => {
+                  try {
+                    toastEvent(await post(`/api/profiles/${p.id}/publish`, {}), "Published");
+                    profilesView(el, ctx);
+                  } catch (err) {
+                    toastError(err);
+                  }
+                },
+              }, p.state === "modified" ? "Re-publish" : "Publish") : null,
               admin ? h("button", { class: "btn btn-sm", type: "button", onclick: () => profileWizard(el, ctx, catalog, p) }, "Add policy") : null,
               ctx.can("owner") ? h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => modal("Delete profile?", h("p", {}, `Delete "${p.name}"? It is removed from all groups and hidden from this view immediately.`), [
                 { label: "Cancel" },
