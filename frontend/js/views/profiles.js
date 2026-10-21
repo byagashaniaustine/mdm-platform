@@ -341,15 +341,53 @@ function profileWizard(el, ctx, catalog, existing) {
   };
   function renderIosKiosk() {
     const mode = select([{ value: "single", label: "Single app" }, { value: "multi", label: "Multiple apps" }]);
-    const bundleId = input({ placeholder: "com.acme.pos" });
-    const multiList = h("textarea", { rows: 5, class: "mono", placeholder: "com.acme.pos\ncom.acme.scanner" });
-    const singleWrap = h("div", { class: "stack" }, field("Bundle identifier", bundleId, "The one app the device is locked to (from App Store or your custom app)."));
-    const multiWrap = h("div", { class: "stack", style: "display:none" }, field("Allowed bundle IDs (one per line)", multiList, "The apps allowed to run in kiosk. Apple implements this via Autonomous Single App Mode."));
-    const toggleMode = () => {
-      singleWrap.style.display = mode.value === "single" ? "" : "none";
-      multiWrap.style.display = mode.value === "multi" ? "" : "none";
+    // Same shape as Android kiosk: checkbox list fed from the Zoho app repo + manual-add rows.
+    const appsBox = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading apps from Zoho…"));
+    const picks = [];
+    let nextManualId = 1;
+    const modeHint = h("p", { class: "muted small" }, "Pick the apps allowed to run in kiosk.");
+    const refreshHint = () => {
+      modeHint.textContent = mode.value === "single"
+        ? "Pick exactly one app. The device will be locked to it."
+        : "Pick one or more apps. They'll be allowed to run in kiosk (implemented via Apple's Autonomous Single App Mode).";
     };
-    mode.addEventListener("change", toggleMode);
+    mode.addEventListener("change", refreshHint);
+    refreshHint();
+
+    const manualRow = () => {
+      const id = `manual-ios-${Date.now()}-${nextManualId++}`;
+      const name = input({ placeholder: "App display name" });
+      const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos" });
+      const row = h("div", { class: "kiosk-app" },
+        h("span", {}, "✱ manual"),
+        name,
+        pkg,
+        h("button", { class: "btn btn-xs", type: "button", onclick: () => { picks.splice(picks.findIndex((p) => p.a.app_id === id), 1); row.remove(); } }, "Remove"),
+      );
+      picks.push({ a: { app_id: id, app_name: null }, cb: { checked: true }, pkg, name, manual: true });
+      return row;
+    };
+    const addManual = h("button", { class: "btn btn-sm", type: "button", onclick: () => appsBox.appendChild(manualRow()) }, "+ Add bundle manually");
+
+    get("/api/apps").then((apps) => {
+      const ios = (apps ?? []).filter((a) => Number(a.platform_type) === 1);
+      if (ios.length) {
+        clear(appsBox, ...ios.map((a) => {
+          const cb = h("input", { type: "checkbox" });
+          const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
+          picks.push({ a, cb, pkg, manual: false });
+          return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
+        }), addManual);
+      } else {
+        clear(appsBox,
+          h("p", { class: "muted small" }, "No iOS apps in the Zoho repository yet. Upload one there, OR add a bundle identifier manually below (works if the app is already installed on the device)."),
+          addManual,
+        );
+      }
+    }).catch((err) => {
+      clear(appsBox, h("p", { class: "muted" }, "Could not load apps from Zoho. You can still add by bundle identifier:"), addManual);
+      toastError(err);
+    });
 
     const disableTouch = h("input", { type: "checkbox" });
     const disableRotation = h("input", { type: "checkbox" });
@@ -377,8 +415,9 @@ function profileWizard(el, ctx, catalog, existing) {
     clear(formBox,
       h("p", { class: "muted small" }, "iOS kiosk is supervised-only (requires Apple Business Manager / Apple Configurator)."),
       field("Mode", mode),
-      singleWrap,
-      multiWrap,
+      h("h3", {}, "Apps"),
+      modeHint,
+      appsBox,
       h("div", { class: "row" }, h("h3", {}, "Device behavior"), lockdown),
       h("h4", { class: "section-head" }, "hardware"),
       h("div", { class: "restrictions" },
@@ -399,23 +438,34 @@ function profileWizard(el, ctx, catalog, existing) {
         checkbox(monoAudio, "Mono Audio"),
       ),
     );
-    collect = () => ({
-      mode: mode.value,
-      bundleIdentifier: bundleId.value.trim(),
-      bundleIdentifiers: multiList.value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
-      disableTouch: disableTouch.checked,
-      disableDeviceRotation: disableRotation.checked,
-      disableVolumeButtons: disableVolume.checked,
-      disableRingerSwitch: disableRinger.checked,
-      disableSleepWakeButton: disableSleep.checked,
-      disableAutoLock: disableAutoLock.checked,
-      enableVoiceOver: voiceOver.checked,
-      enableZoom: zoom.checked,
-      enableInvertColors: invert.checked,
-      enableAssistiveTouch: assistive.checked,
-      enableSpeakSelection: speakSel.checked,
-      enableMonoAudio: monoAudio.checked,
-    });
+    collect = () => {
+      const chosen = picks
+        .filter((p) => p.cb.checked && p.pkg.value.trim())
+        .map((p) => p.pkg.value.trim());
+      if (mode.value === "single" && chosen.length !== 1) {
+        throw Object.assign(new Error("Single-app kiosk needs exactly one app picked"), { code: "VALIDATION_FAILED" });
+      }
+      if (mode.value === "multi" && !chosen.length) {
+        throw Object.assign(new Error("Multi-app kiosk needs at least one app picked"), { code: "VALIDATION_FAILED" });
+      }
+      return {
+        mode: mode.value,
+        bundleIdentifier: mode.value === "single" ? chosen[0] : undefined,
+        bundleIdentifiers: mode.value === "multi" ? chosen : undefined,
+        disableTouch: disableTouch.checked,
+        disableDeviceRotation: disableRotation.checked,
+        disableVolumeButtons: disableVolume.checked,
+        disableRingerSwitch: disableRinger.checked,
+        disableSleepWakeButton: disableSleep.checked,
+        disableAutoLock: disableAutoLock.checked,
+        enableVoiceOver: voiceOver.checked,
+        enableZoom: zoom.checked,
+        enableInvertColors: invert.checked,
+        enableAssistiveTouch: assistive.checked,
+        enableSpeakSelection: speakSel.checked,
+        enableMonoAudio: monoAudio.checked,
+      };
+    };
   }
 
   function renderIosWifi() {
