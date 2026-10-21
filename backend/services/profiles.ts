@@ -326,13 +326,15 @@ export const deleteProfile = (s: Session, profileId: string, idem: string | null
 async function ensureZohoProfile(eid: string, profileId: string, attempts: number): Promise<string> {
   const p = await getProfile(eid, profileId);
   if (p.zoho_profile_id) return p.zoho_profile_id;
-  if (attempts > 1) {
-    const existing = (await zoho.listProfiles(eid)).find((x) => x.profile_name === p.name);
-    if (existing?.profile_id) {
-      const zid = String(existing.profile_id);
-      await run(db().from("profiles").update({ zoho_profile_id: zid }).eq("id", p.id));
-      return zid;
-    }
+  // Always look for an existing Zoho profile with this name BEFORE creating. A
+  // previous failed attempt (payload-add rejected after the shell was created)
+  // leaves the shell behind — recreating same-name hits Zoho's 409
+  // "Resource Already Exists". Was `attempts > 1`; now always.
+  const existing = (await zoho.listProfiles(eid)).find((x) => x.profile_name === p.name);
+  if (existing?.profile_id) {
+    const zid = String(existing.profile_id);
+    await run(db().from("profiles").update({ zoho_profile_id: zid }).eq("id", p.id));
+    return zid;
   }
   const created = await zoho.createProfile(eid, {
     name: p.name,

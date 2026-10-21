@@ -17,7 +17,9 @@ export const PAYLOAD = {
     restrictions: "restrictionspolicy",
     passcode: "passcodepolicy",
     wifi: "wifipolicy",
-    kiosk: "singleappmodepolicy",
+    // iOS Single App Mode goes through the same `applockpolicy` payload Zoho uses
+    // for Android kiosk. `singleappmodepolicy` (my previous guess) returns 404.
+    kiosk: "applockpolicy",
     webfilter: "webcontentfilterpolicy",
     vpn: "vpnpolicy",
     email: "emailpolicy",

@@ -239,7 +239,9 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     for (const a of ["enable_lost_mode", "remote_alarm", "restart", "shutdown"]) {
       assert.equal(actionAppliesTo(a, sup), true, `${a} supervised`);
       assert.equal(actionAppliesTo(a, unsup), false, `${a} unsupervised`);
-      assert.equal(actionAppliesTo(a, unknown), true, `${a} unknown is let through`);
+      // Previously let unknown through; prod backlog showed Zoho rejects these every
+      // time with "Command not applicable for Device", so unknown now blocks too.
+      assert.equal(actionAppliesTo(a, unknown), false, `${a} unknown is blocked`);
     }
     for (const a of ["lock", "complete_wipe", "clear_passcode", "scan", "fetch_location"]) assert.equal(actionAppliesTo(a, unsup), true, a);
     // Apple MDM can't set a passcode on iOS (only clear it), supervised or not —
@@ -273,9 +275,9 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     assert.deepEqual(buildR({ allow_camera: "restrict" }), { allow_camera: 2 });
   });
 
-  Deno.test("iOS kiosk routes to singleappmodepolicy, validates bundle ids", () => {
+  Deno.test("iOS kiosk routes to applockpolicy, validates bundle ids", () => {
     const single = buildPayload("ios", "kiosk", { mode: "single", bundleIdentifier: "com.acme.pos" });
-    assert.equal(single.name, "singleappmodepolicy");
+    assert.equal(single.name, "applockpolicy");
     assert.equal((single.body as Record<string, unknown>).kiosk_mode, 0);
     assert.equal((single.body as Record<string, unknown>).bundle_identifier, "com.acme.pos");
     const multi = buildIosKioskPayload({ mode: "multi", bundleIdentifiers: ["com.acme.a", "com.acme.b"] });

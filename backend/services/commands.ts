@@ -87,8 +87,10 @@ export function actionAppliesTo(action: string, device: Pick<DeviceRow, "platfor
   if (!def.platforms.includes(p)) return false;
   // Android shutdown/restart only on Samsung Knox.
   if (p === "android" && def.knoxOnlyAndroid && !device.is_knox) return false;
-  // Unknown supervision (null, not synced yet) is let through; only a known "false" blocks.
-  if (p === "ios" && def.supervisedOnlyIos && device.is_supervised === false) return false;
+  // Supervised-only iOS commands require is_supervised === true. Null/unknown blocks
+  // too — the backlog shows Zoho rejects these every time with "Command not applicable
+  // for Device", so letting them through just creates failed events.
+  if (p === "ios" && def.supervisedOnlyIos && device.is_supervised !== true) return false;
   return true;
 }
 
