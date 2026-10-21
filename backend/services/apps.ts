@@ -94,6 +94,56 @@ export async function groupInstalledApps(s: Session, groupId: string) {
   return [...seen.values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
 }
 
+/**
+ * Union of apps installed across every enrolled device in the enterprise.
+ * Used by the kiosk picker to offer real options when the Zoho app repo is empty.
+ * Dedupes by identifier and carries a `devices` count for UX ("installed on 7
+ * devices"). Pass `platformType` (1=iOS, 2=Android) to filter.
+ */
+export async function enterpriseInstalledApps(s: Session, platformType?: number) {
+  type Row = { zoho_device_id: string | null };
+  const rows = await run<Row[]>(
+    db().from("devices").select("zoho_device_id")
+      .eq("enterprise_id", s.enterpriseId).eq("is_removed", false).not("zoho_device_id", "is", null),
+  );
+  const zohoIds = rows.map((r) => r.zoho_device_id).filter((x): x is string => !!x);
+  if (!zohoIds.length) return [] as { identifier: string; app_name: string; platform_type: string; app_version?: string; devices: number }[];
+
+  type App = { identifier?: string; app_name?: string; platform_type?: string | number; app_version?: string };
+  const seen = new Map<string, { identifier: string; app_name: string; platform_type: string; app_version?: string; devices: number }>();
+  // 3-at-a-time, same rate-limit shape as groupInstalledApps.
+  for (let i = 0; i < zohoIds.length; i += 3) {
+    const chunk = zohoIds.slice(i, i + 3);
+    const batches = await Promise.all(chunk.map(async (zid) => {
+      try {
+        const resp = await zoho.listDeviceApps(s.enterpriseId, zid);
+        const list = (resp as { installed_apps?: App[] }).installed_apps ?? [];
+        return Array.isArray(list) ? list : [];
+      } catch {
+        return [] as App[];
+      }
+    }));
+    for (const apps of batches) {
+      for (const a of apps) {
+        const id = a.identifier;
+        if (!id) continue;
+        const pt = String(a.platform_type ?? "");
+        if (platformType !== undefined && Number(pt) !== platformType) continue;
+        const existing = seen.get(id);
+        if (existing) existing.devices += 1;
+        else seen.set(id, {
+          identifier: id,
+          app_name: a.app_name ?? id,
+          platform_type: pt,
+          app_version: a.app_version,
+          devices: 1,
+        });
+      }
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
+}
+
 // ---------------------------------------------------------------- executors
 async function zohoGroupId(enterpriseId: string, groupId: string): Promise<string> {
   const g = await getGroup(enterpriseId, groupId);

@@ -12,7 +12,7 @@ import {
   PURPOSES,
 } from "../services/profiles.ts";
 import { listApps } from "../zoho/api.ts";
-import { deleteFromBlacklistRepo, listBlacklistApps } from "../services/apps.ts";
+import { deleteFromBlacklistRepo, enterpriseInstalledApps, listBlacklistApps } from "../services/apps.ts";
 import { eventResponse } from "./helpers.ts";
 
 export function profileRoutes() {
@@ -72,6 +72,16 @@ export function appRoutes() {
   r.use("*", requireSession);
   // Live from Zoho: used by the kiosk builder to pick apps (app_id + package name).
   r.get("/", async (c) => c.json({ data: await listApps(c.get("session").enterpriseId) }));
+  // Fallback source when the Zoho app repo is empty — union of apps actually installed
+  // on enrolled devices. Optional ?platform=1 (iOS) / 2 (Android) filters the result.
+  r.get("/installed", async (c) => {
+    const raw = c.req.query("platform");
+    const platform = raw ? Number(raw) : undefined;
+    if (raw !== undefined && !Number.isInteger(platform)) {
+      return c.json({ error: { code: "VALIDATION_FAILED", message: "platform must be a number" } }, 400);
+    }
+    return c.json({ data: await enterpriseInstalledApps(c.get("session"), platform) });
+  });
   r.get("/blacklist", async (c) => c.json({ data: await listBlacklistApps(c.get("session")) }));
   // Nuke apps from the enterprise blacklist repo entirely. Owner-only since
   // this affects every group that has those apps blacklisted.

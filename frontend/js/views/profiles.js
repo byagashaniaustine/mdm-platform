@@ -179,20 +179,46 @@ function profileWizard(el, ctx, catalog, existing) {
 
       const addManual = h("button", { class: "btn btn-sm", type: "button", onclick: () => appsBox.appendChild(manualRow()) }, "+ Add app by package name");
 
-      get("/api/apps").then((apps) => {
+      const renderRepoRows = (apps) => apps.map((a) => {
+        const cb = h("input", { type: "checkbox" });
+        const pkg = input({ placeholder: "package name, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
+        picks.push({ a, cb, pkg, manual: false });
+        return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
+      });
+      const renderInstalledRows = (apps) => apps.map((a) => {
+        const cb = h("input", { type: "checkbox" });
+        const pkg = input({ placeholder: "package name", value: a.identifier ?? "" });
+        picks.push({ a: { app_id: `installed-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
+        return h("div", { class: "kiosk-app" },
+          h("label", { class: "pick" }, cb, h("span", {}, a.app_name, h("span", { class: "muted small" }, ` · on ${a.devices} device${a.devices === 1 ? "" : "s"}`))),
+          pkg,
+        );
+      });
+
+      get("/api/apps").then(async (apps) => {
         const android = apps.filter((a) => Number(a.platform_type) === 2 || a.platform_type === undefined);
         if (android.length) {
-          clear(appsBox, ...android.map((a) => {
-            const cb = h("input", { type: "checkbox" });
-            const pkg = input({ placeholder: "package name, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
-            picks.push({ a, cb, pkg, manual: false });
-            return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
-          }), addManual);
-        } else {
-          clear(appsBox,
-            h("p", { class: "muted small" }, "The Zoho app repository is empty. Upload the kiosk app there, OR add it below by its Android package name (works if the app is already installed on the device)."),
-            addManual,
-          );
+          clear(appsBox, ...renderRepoRows(android), addManual);
+          return;
+        }
+        clear(appsBox, h("p", { class: "muted" }, "Zoho app repo is empty. Scanning enrolled devices…"));
+        try {
+          const installed = await get("/api/apps/installed?platform=2");
+          if (installed?.length) {
+            clear(appsBox,
+              h("p", { class: "muted small" }, "Showing apps installed on your enrolled Android devices. Upload apps to Zoho for the official app_id, or pick from here if you just need the package name."),
+              ...renderInstalledRows(installed),
+              addManual,
+            );
+          } else {
+            clear(appsBox,
+              h("p", { class: "muted small" }, "The Zoho app repository is empty and no enrolled Android devices report installed apps yet. Upload a kiosk app to Zoho, OR add a package name manually below (works if the app is already on the device)."),
+              addManual,
+            );
+          }
+        } catch (err) {
+          clear(appsBox, h("p", { class: "muted small" }, "Could not scan enrolled devices. You can still add by package name:"), addManual);
+          toastError(err);
         }
       }).catch((err) => {
         clear(appsBox, h("p", { class: "muted" }, "Could not load apps from Zoho. You can still add by package name:"), addManual);
@@ -369,20 +395,48 @@ function profileWizard(el, ctx, catalog, existing) {
     };
     const addManual = h("button", { class: "btn btn-sm", type: "button", onclick: () => appsBox.appendChild(manualRow()) }, "+ Add bundle manually");
 
-    get("/api/apps").then((apps) => {
+    const renderRepoRows = (apps) => apps.map((a) => {
+      const cb = h("input", { type: "checkbox" });
+      const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
+      picks.push({ a, cb, pkg, manual: false });
+      return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
+    });
+    const renderInstalledRows = (apps) => apps.map((a) => {
+      const cb = h("input", { type: "checkbox" });
+      const pkg = input({ placeholder: "bundle identifier", value: a.identifier ?? "" });
+      // Synthetic app_id so the pick entry has one; the iOS builder only uses the bundle anyway.
+      picks.push({ a: { app_id: `installed-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
+      return h("div", { class: "kiosk-app" },
+        h("label", { class: "pick" }, cb, h("span", {}, a.app_name, h("span", { class: "muted small" }, ` · on ${a.devices} device${a.devices === 1 ? "" : "s"}`))),
+        pkg,
+      );
+    });
+
+    get("/api/apps").then(async (apps) => {
       const ios = (apps ?? []).filter((a) => Number(a.platform_type) === 1);
       if (ios.length) {
-        clear(appsBox, ...ios.map((a) => {
-          const cb = h("input", { type: "checkbox" });
-          const pkg = input({ placeholder: "bundle identifier, e.g. com.acme.pos", value: a.bundle_identifier ?? a.identifier ?? "" });
-          picks.push({ a, cb, pkg, manual: false });
-          return h("div", { class: "kiosk-app" }, h("label", { class: "pick" }, cb, h("span", {}, a.app_name)), pkg);
-        }), addManual);
-      } else {
-        clear(appsBox,
-          h("p", { class: "muted small" }, "No iOS apps in the Zoho repository yet. Upload one there, OR add a bundle identifier manually below (works if the app is already installed on the device)."),
-          addManual,
-        );
+        clear(appsBox, ...renderRepoRows(ios), addManual);
+        return;
+      }
+      // Zoho repo empty → scan enrolled devices for actually-installed apps.
+      clear(appsBox, h("p", { class: "muted" }, "Zoho app repo is empty. Scanning enrolled devices…"));
+      try {
+        const installed = await get("/api/apps/installed?platform=1");
+        if (installed?.length) {
+          clear(appsBox,
+            h("p", { class: "muted small" }, `Showing apps installed on your enrolled iPhones/iPads. Upload apps to Zoho for the official app_id, or pick from here if you just need the bundle.`),
+            ...renderInstalledRows(installed),
+            addManual,
+          );
+        } else {
+          clear(appsBox,
+            h("p", { class: "muted small" }, "No iOS apps in the Zoho repository and no enrolled iPhones/iPads report installed apps yet. Add a bundle identifier manually below (works if the app is already on the device)."),
+            addManual,
+          );
+        }
+      } catch (err) {
+        clear(appsBox, h("p", { class: "muted small" }, "Could not scan enrolled devices. You can still add by bundle identifier:"), addManual);
+        toastError(err);
       }
     }).catch((err) => {
       clear(appsBox, h("p", { class: "muted" }, "Could not load apps from Zoho. You can still add by bundle identifier:"), addManual);
