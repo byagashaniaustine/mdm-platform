@@ -220,7 +220,16 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
 // ------------------------------------------------------------ Apple devices
 {
   const { actionAppliesTo } = await import("../services/commands.ts");
-  const { buildIosPasscodePayload, buildRestrictionsPayload: buildR } = await import("../zoho/payloads.ts");
+  const {
+    buildIosEmailPayload,
+    buildIosKioskPayload,
+    buildIosPasscodePayload,
+    buildIosProxyPayload,
+    buildIosVpnPayload,
+    buildIosWebFilterPayload,
+    buildIosWifiPayload,
+    buildRestrictionsPayload: buildR,
+  } = await import("../zoho/payloads.ts");
   const { buildPayload } = await import("../services/profiles.ts");
 
   Deno.test("unsupervised iPhones don't get supervised-only commands", () => {
@@ -260,8 +269,85 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     const r = buildPayload("ios", "restrictions", { restrictions: { allow_app_removal: "restrict" } });
     assert.equal(r.name, "restrictionspolicy");
     assert.equal(buildPayload("ios", "passcode", { minLength: 4 }).name, "passcodepolicy");
-    assert.throws(() => buildPayload("ios", "kiosk", {}));
     // Android unchanged
     assert.deepEqual(buildR({ allow_camera: "restrict" }), { allow_camera: 2 });
+  });
+
+  Deno.test("iOS kiosk routes to singleappmodepolicy, validates bundle ids", () => {
+    const single = buildPayload("ios", "kiosk", { mode: "single", bundleIdentifier: "com.acme.pos" });
+    assert.equal(single.name, "singleappmodepolicy");
+    assert.equal((single.body as Record<string, unknown>).kiosk_mode, 0);
+    assert.equal((single.body as Record<string, unknown>).bundle_identifier, "com.acme.pos");
+    const multi = buildIosKioskPayload({ mode: "multi", bundleIdentifiers: ["com.acme.a", "com.acme.b"] });
+    assert.equal(multi.kiosk_mode, 1);
+    assert.deepEqual(JSON.parse(multi.bundle_identifiers as string), ["com.acme.a", "com.acme.b"]);
+    assert.throws(() => buildIosKioskPayload({ mode: "single" }));
+    assert.throws(() => buildIosKioskPayload({ mode: "single", bundleIdentifier: "has spaces" }));
+    assert.throws(() => buildIosKioskPayload({ mode: "multi", bundleIdentifiers: [] }));
+  });
+
+  Deno.test("iOS Wi-Fi payload requires password for encrypted networks", () => {
+    const p = buildIosWifiPayload({ ssid: "Office", password: "s3cret", encryption: "WPA2" });
+    assert.equal(p.ssid_str, "Office");
+    assert.equal(p.encryption_type, "WPA2");
+    assert.equal(p.password, "s3cret");
+    const open = buildIosWifiPayload({ ssid: "Guest", encryption: "None" });
+    assert.equal("password" in open, false);
+    assert.throws(() => buildIosWifiPayload({ ssid: "", password: "x" }));
+    assert.throws(() => buildIosWifiPayload({ ssid: "x", encryption: "WPA2" }));
+    const r = buildPayload("ios", "wifi", { ssid: "Office", encryption: "WPA2", password: "pw" });
+    assert.equal(r.name, "wifipolicy");
+  });
+
+  Deno.test("iOS web filter encodes allow-only vs limit-adult", () => {
+    const allow = buildIosWebFilterPayload({ mode: "allow-only", permittedUrls: ["https://a.co"], allowedUrls: [{ title: "A", url: "https://a.co" }] });
+    assert.equal(allow.filter_type, "allow-only");
+    assert.deepEqual(JSON.parse(allow.permitted_urls as string), ["https://a.co"]);
+    const limit = buildIosWebFilterPayload({ mode: "limit-adult", blacklistedUrls: ["https://bad.example"] });
+    assert.equal(limit.filter_type, "limit-adult-content");
+    assert.throws(() => buildIosWebFilterPayload({ mode: "allow-only", permittedUrls: [] }));
+    assert.throws(() => buildIosWebFilterPayload({ mode: "allow-only", permittedUrls: ["not-a-url"] }));
+    assert.equal(buildPayload("ios", "webfilter", { mode: "limit-adult", blacklistedUrls: [] }).name, "webcontentfilterpolicy");
+  });
+
+  Deno.test("iOS VPN payload validates servers and types", () => {
+    const vpn = buildIosVpnPayload({ connectionName: "Work", server: "vpn.co.tz", type: "IKEv2", account: "jane", password: "p" });
+    assert.equal(vpn.connection_name, "Work");
+    assert.equal(vpn.connection_type, "IKEv2");
+    assert.throws(() => buildIosVpnPayload({ connectionName: "", server: "vpn.co.tz" }));
+    assert.throws(() => buildIosVpnPayload({ connectionName: "x", server: "" }));
+    assert.throws(() => buildIosVpnPayload({ connectionName: "x", server: "y", proxyServer: "p", proxyPort: 70000 }));
+    assert.equal(buildPayload("ios", "vpn", { connectionName: "x", server: "y" }).name, "vpnpolicy");
+  });
+
+  Deno.test("iOS email payload applies IMAP defaults and validates addresses", () => {
+    const em = buildIosEmailPayload({
+      accountDescription: "Work",
+      emailAddress: "jane@co.tz",
+      incomingMailServer: "imap.co.tz",
+      outgoingMailServer: "smtp.co.tz",
+    });
+    assert.equal(em.email_account_type, "EmailTypeIMAP");
+    assert.equal(em.incoming_mail_server_port, 993);
+    assert.equal(em.outgoing_mail_server_port, 587);
+    assert.equal(em.incoming_mail_server_username, "jane@co.tz");
+    assert.throws(() => buildIosEmailPayload({ accountDescription: "", emailAddress: "a@b.co", incomingMailServer: "x", outgoingMailServer: "y" }));
+    assert.throws(() => buildIosEmailPayload({ accountDescription: "x", emailAddress: "not-an-email", incomingMailServer: "x", outgoingMailServer: "y" }));
+    assert.equal(buildPayload("ios", "email", { accountDescription: "x", emailAddress: "a@b.co", incomingMailServer: "x", outgoingMailServer: "y" }).name, "emailpolicy");
+  });
+
+  Deno.test("iOS global HTTP proxy supports manual and PAC modes", () => {
+    const manual = buildIosProxyPayload({ proxyType: "manual", server: "proxy.co.tz", port: 8080, username: "u", password: "p" });
+    assert.equal(manual.proxy_type, "manual");
+    assert.equal(manual.proxy_server_port, 8080);
+    const auto = buildIosProxyPayload({ proxyType: "auto", pacUrl: "https://proxy.co.tz/wpad.dat" });
+    assert.equal(auto.proxy_type, "auto");
+    assert.throws(() => buildIosProxyPayload({ proxyType: "manual", server: "x" })); // missing port
+    assert.throws(() => buildIosProxyPayload({ proxyType: "auto", pacUrl: "ftp://x" }));
+    assert.equal(buildPayload("ios", "proxy", { proxyType: "auto", pacUrl: "https://x/wpad.dat" }).name, "globalhttpproxypolicy");
+  });
+
+  Deno.test("iOS buildPayload rejects purposes outside the iOS allow-list", () => {
+    assert.throws(() => buildPayload("ios", "frp", { accounts: [] }));
   });
 }

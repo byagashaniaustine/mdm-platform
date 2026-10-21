@@ -17,10 +17,27 @@ export const PAYLOAD = {
     restrictions: "restrictionspolicy",
     passcode: "passcodepolicy",
     wifi: "wifipolicy",
+    kiosk: "singleappmodepolicy",
+    webfilter: "webcontentfilterpolicy",
+    vpn: "vpnpolicy",
+    email: "emailpolicy",
+    proxy: "globalhttpproxypolicy",
   },
 } as const;
 
-export type Purpose = "restrictions" | "kiosk" | "passcode" | "frp" | "wifi" | "custom" | "apps" | "app_blacklist";
+export type Purpose =
+  | "restrictions"
+  | "kiosk"
+  | "passcode"
+  | "frp"
+  | "wifi"
+  | "webfilter"
+  | "vpn"
+  | "email"
+  | "proxy"
+  | "custom"
+  | "apps"
+  | "app_blacklist";
 
 // 'apps' and 'app_blacklist' are platform-synthetic profiles — they live only
 // in our DB (no Zoho profile_id). Their payload_config holds the app list; the
@@ -195,6 +212,54 @@ export const IOS_RESTRICTIONS: readonly RestrictionDef[] = [
   { kind: "binary", key: "allow_vpn_creation", label: "Add VPN configurations", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "binary", key: "allow_app_cellular_data", label: "Change mobile data settings for apps", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
   { kind: "boolean", key: "force_wifi_whitelisting", label: "Only join Wi-Fi networks sent by MDM", category: "network", recommended: false, supervised: true },
+  // -------------------------------------------------------- extra security
+  { kind: "binary", key: "allow_password_autofill", label: "Password AutoFill", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_password_proximity_request", label: "Request passwords from nearby devices", category: "security", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_fingerprint_unlock", label: "Touch ID / Face ID unlock", category: "security", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_lock_screen_control_center", label: "Control Center on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_lock_screen_notifications_view", label: "Notifications view on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_lock_screen_today_view", label: "Today view on lock screen", category: "security", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "force_automatic_date_time", label: "Force automatic date/time", category: "security", allow: true, restrict: false, recommended: "allow", supervised: true },
+  // ------------------------------------------------------------ more apps
+  { kind: "binary", key: "allow_app_clips", label: "App Clips", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_assistant_user_generated_content", label: "Siri user-generated content (web search)", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_assistant_while_locked", label: "Siri while locked", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_books_store", label: "Apple Books Store", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_books_store_erotica", label: "Explicit Apple Books content", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_music_service", label: "Apple Music", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_news", label: "Apple News", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_podcasts", label: "Podcasts", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_radio_service", label: "Apple Music radio", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_video_conferencing", label: "FaceTime video conferencing", category: "apps", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_youtube", label: "YouTube", category: "apps", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_itunes", label: "iTunes Store", category: "apps", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  // ------------------------------------------------------------- more data
+  { kind: "binary", key: "allow_cloud_keychain_sync", label: "iCloud Keychain", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_managed_apps_cloud_sync", label: "Managed apps store data in iCloud", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_cloud_private_relay", label: "iCloud Private Relay", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_shared_stream", label: "Shared Photo Stream", category: "data", allow: true, restrict: false, recommended: "restrict" },
+  { kind: "binary", key: "allow_shared_device_temporary_session", label: "Shared iPad temporary session", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_file_sharing", label: "Files app USB file sharing", category: "data", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_remote_screen_observation", label: "Classroom screen observation", category: "data", allow: true, restrict: false, recommended: "allow", supervised: true },
+  // --------------------------------------------------------- more hardware
+  { kind: "binary", key: "allow_use_of_microphone", label: "Microphone", category: "hardware", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_dictation", label: "Dictation (voice-to-text)", category: "hardware", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_personal_hotspot_modification", label: "Change Personal Hotspot settings", category: "hardware", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  // ---------------------------------------------------------- more network
+  { kind: "binary", key: "allow_auto_join_wifi", label: "Auto-join Wi-Fi networks", category: "network", allow: true, restrict: false, recommended: "allow" },
+  { kind: "binary", key: "allow_cellular_plan_modification", label: "Change cellular plan", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_esim_modification", label: "Change eSIM settings", category: "network", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_definition_lookup", label: "Dictionary definition lookup", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_predictive_keyboard", label: "Predictive keyboard", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_spell_check", label: "Spell check", category: "network", allow: true, restrict: false, recommended: "allow", supervised: true },
+  // ------------------------------------------------------ more settings/UI
+  { kind: "binary", key: "allow_wallpaper_modification", label: "Change wallpaper", category: "settings", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_find_my_friends_modification", label: "Change Find My Friends settings", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_notification_modification", label: "Change notification settings", category: "settings", allow: true, restrict: false, recommended: "allow", supervised: true },
+  { kind: "binary", key: "allow_pairing", label: "Pair with Mac/PC (iTunes/Finder)", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_system_app_removal", label: "Delete built-in system apps", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_remote_app_pairing", label: "Pair with Remote app", category: "settings", allow: true, restrict: false, recommended: "restrict", supervised: true },
+  { kind: "binary", key: "allow_assistant_profanity", label: "Siri profanity filter", category: "settings", allow: false, restrict: true, recommended: "restrict", supervised: true, hint: "Enabled = profanity is filtered. Disable = Siri can say or recognise profanity." },
 ];
 
 const RESTRICTION_BY_KEY = new Map(ANDROID_RESTRICTIONS.map((r) => [r.key, r] as const));
@@ -431,6 +496,258 @@ export function buildFrpPayload(accounts: { emailUserId: string; email: string }
   if (!accounts.length) fail("VALIDATION_FAILED", "Add at least one FRP Google account");
   return {
     efrp_details: JSON.stringify(accounts.map((a) => ({ EMAIL_USER_ID: a.emailUserId, EMAIL_ID: a.email }))),
+  };
+}
+
+// --------------------------------------------------------------- iOS kiosk
+/**
+ * iOS kiosk (`singleappmodepolicy`, supervised only).
+ * Single-app mode locks the device to one app. Multi-app mode is implemented
+ * via Apple's Autonomous Single App Mode (apps on the list can enter/exit kiosk).
+ */
+export function buildIosKioskPayload(input: {
+  mode: "single" | "multi";
+  bundleIdentifier?: string; // single: the one app to lock to
+  bundleIdentifiers?: string[]; // multi: apps allowed to run in kiosk
+  disableTouch?: boolean;
+  disableDeviceRotation?: boolean;
+  disableVolumeButtons?: boolean;
+  disableRingerSwitch?: boolean;
+  disableSleepWakeButton?: boolean;
+  disableAutoLock?: boolean;
+  enableVoiceOver?: boolean;
+  enableZoom?: boolean;
+  enableInvertColors?: boolean;
+  enableAssistiveTouch?: boolean;
+  enableSpeakSelection?: boolean;
+  enableMonoAudio?: boolean;
+}) {
+  const pkg = (s: string) => /^[a-zA-Z][\w.-]+$/.test(s);
+  if (input.mode === "single") {
+    if (!input.bundleIdentifier || !pkg(input.bundleIdentifier)) {
+      fail("VALIDATION_FAILED", "Single-app kiosk needs a bundle identifier (e.g. com.acme.pos)");
+    }
+    return {
+      kiosk_mode: 0, // 0 single, 1 multi
+      bundle_identifier: input.bundleIdentifier,
+      disable_touch: input.disableTouch ?? false,
+      disable_device_rotation: input.disableDeviceRotation ?? false,
+      disable_volume_buttons: input.disableVolumeButtons ?? false,
+      disable_ringer_switch: input.disableRingerSwitch ?? false,
+      disable_sleep_wake_button: input.disableSleepWakeButton ?? false,
+      disable_auto_lock: input.disableAutoLock ?? true,
+      enable_voice_over: input.enableVoiceOver ?? false,
+      enable_zoom: input.enableZoom ?? false,
+      enable_invert_colors: input.enableInvertColors ?? false,
+      enable_assistive_touch: input.enableAssistiveTouch ?? false,
+      enable_speak_selection: input.enableSpeakSelection ?? false,
+      enable_mono_audio: input.enableMonoAudio ?? false,
+    };
+  }
+  const ids = (input.bundleIdentifiers ?? []).map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) fail("VALIDATION_FAILED", "Multi-app kiosk needs at least one bundle identifier");
+  for (const id of ids) if (!pkg(id)) fail("VALIDATION_FAILED", `Invalid bundle identifier ${id}`);
+  return {
+    kiosk_mode: 1,
+    bundle_identifiers: JSON.stringify(ids),
+    disable_auto_lock: input.disableAutoLock ?? true,
+  };
+}
+
+// ---------------------------------------------------------------- iOS Wi-Fi
+const IOS_WIFI_ENCRYPTIONS = ["WEP", "WPA", "WPA2", "Any", "None"] as const;
+export function buildIosWifiPayload(input: {
+  ssid: string;
+  encryption?: typeof IOS_WIFI_ENCRYPTIONS[number];
+  password?: string;
+  hiddenNetwork?: boolean;
+  autoJoin?: boolean;
+  proxyType?: "None" | "Manual" | "Auto";
+  proxyServer?: string;
+  proxyPort?: number;
+  proxyUser?: string;
+  proxyPassword?: string;
+}) {
+  if (!input.ssid || !input.ssid.trim()) fail("VALIDATION_FAILED", "Wi-Fi SSID is required");
+  const enc = input.encryption ?? "WPA2";
+  if (!IOS_WIFI_ENCRYPTIONS.includes(enc)) fail("VALIDATION_FAILED", `encryption must be one of ${IOS_WIFI_ENCRYPTIONS.join(", ")}`);
+  if (enc !== "None" && !input.password) fail("VALIDATION_FAILED", "Password is required for encrypted Wi-Fi");
+  const p: Record<string, unknown> = {
+    ssid_str: input.ssid.trim(),
+    encryption_type: enc,
+    hidden_network: input.hiddenNetwork ?? false,
+    auto_join: input.autoJoin ?? true,
+  };
+  if (enc !== "None") p.password = input.password;
+  if (input.proxyType && input.proxyType !== "None") {
+    p.proxy_type = input.proxyType;
+    if (input.proxyType === "Manual") {
+      if (!input.proxyServer) fail("VALIDATION_FAILED", "Proxy server is required for Manual proxy");
+      if (!input.proxyPort || input.proxyPort < 1 || input.proxyPort > 65535) fail("VALIDATION_FAILED", "Proxy port must be 1–65535");
+      p.proxy_server = input.proxyServer;
+      p.proxy_server_port = input.proxyPort;
+      if (input.proxyUser) p.proxy_username = input.proxyUser;
+      if (input.proxyPassword) p.proxy_password = input.proxyPassword;
+    }
+  }
+  return p;
+}
+
+// -------------------------------------------------- iOS Web content filter
+/**
+ * iOS Web Content Filter (`webcontentfilterpolicy`, supervised only).
+ * Two modes: allow-only (specific sites) vs block-all-adult + optional allowlist.
+ */
+export function buildIosWebFilterPayload(input: {
+  mode: "allow-only" | "limit-adult";
+  allowedUrls?: { title: string; url: string }[]; // bookmarks shown
+  permittedUrls?: string[]; // only these allowed (allow-only mode)
+  blacklistedUrls?: string[]; // explicitly denied
+}) {
+  const urlOk = (u: string) => /^https?:\/\/[^\s]+$/i.test(u);
+  if (input.mode === "allow-only") {
+    const urls = (input.permittedUrls ?? []).filter(Boolean);
+    if (!urls.length) fail("VALIDATION_FAILED", "Allow-only mode needs at least one permitted URL");
+    for (const u of urls) if (!urlOk(u)) fail("VALIDATION_FAILED", `Invalid URL ${u}`);
+    const bookmarks = (input.allowedUrls ?? []).map((b) => {
+      if (!urlOk(b.url)) fail("VALIDATION_FAILED", `Invalid bookmark URL ${b.url}`);
+      return { title: b.title.trim() || b.url, url: b.url };
+    });
+    return {
+      filter_type: "allow-only",
+      permitted_urls: JSON.stringify(urls),
+      bookmarks: JSON.stringify(bookmarks),
+    };
+  }
+  const black = (input.blacklistedUrls ?? []).filter(Boolean);
+  for (const u of black) if (!urlOk(u)) fail("VALIDATION_FAILED", `Invalid URL ${u}`);
+  const extra = (input.allowedUrls ?? []).map((b) => {
+    if (!urlOk(b.url)) fail("VALIDATION_FAILED", `Invalid bookmark URL ${b.url}`);
+    return { title: b.title.trim() || b.url, url: b.url };
+  });
+  return {
+    filter_type: "limit-adult-content",
+    blacklisted_urls: JSON.stringify(black),
+    permitted_urls: JSON.stringify(extra),
+  };
+}
+
+// ------------------------------------------------------------------ iOS VPN
+const IOS_VPN_TYPES = ["L2TP", "PPTP", "IPSec", "IKEv2", "AlwaysOn"] as const;
+const IOS_VPN_AUTH = ["Password", "RSA", "Certificate"] as const;
+export function buildIosVpnPayload(input: {
+  connectionName: string;
+  type?: typeof IOS_VPN_TYPES[number];
+  server: string;
+  account?: string;
+  password?: string;
+  sharedSecret?: string;
+  authentication?: typeof IOS_VPN_AUTH[number];
+  sendAllTraffic?: boolean;
+  disconnectOnIdle?: boolean;
+  proxyServer?: string;
+  proxyPort?: number;
+}) {
+  if (!input.connectionName?.trim()) fail("VALIDATION_FAILED", "VPN connection name is required");
+  if (!input.server?.trim()) fail("VALIDATION_FAILED", "VPN server is required");
+  const type = input.type ?? "IKEv2";
+  if (!IOS_VPN_TYPES.includes(type)) fail("VALIDATION_FAILED", `type must be one of ${IOS_VPN_TYPES.join(", ")}`);
+  const auth = input.authentication ?? "Password";
+  if (!IOS_VPN_AUTH.includes(auth)) fail("VALIDATION_FAILED", `authentication must be one of ${IOS_VPN_AUTH.join(", ")}`);
+  const p: Record<string, unknown> = {
+    connection_name: input.connectionName.trim(),
+    connection_type: type,
+    server: input.server.trim(),
+    user_authentication: auth,
+    send_all_traffic: input.sendAllTraffic ?? false,
+    disconnect_on_idle: input.disconnectOnIdle ?? false,
+  };
+  if (input.account) p.account = input.account;
+  if (input.password) p.password = input.password;
+  if (input.sharedSecret) p.shared_secret = input.sharedSecret;
+  if (input.proxyServer) {
+    if (!input.proxyPort || input.proxyPort < 1 || input.proxyPort > 65535) fail("VALIDATION_FAILED", "Proxy port must be 1–65535");
+    p.proxy_server = input.proxyServer;
+    p.proxy_server_port = input.proxyPort;
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------- iOS Email
+const IOS_EMAIL_PROTOCOLS = ["IMAP", "POP"] as const;
+export function buildIosEmailPayload(input: {
+  accountDescription: string;
+  accountType?: typeof IOS_EMAIL_PROTOCOLS[number];
+  userDisplayName?: string;
+  emailAddress: string;
+  incomingMailServer: string;
+  incomingMailPort?: number;
+  incomingUseSsl?: boolean;
+  incomingAuthentication?: "Password" | "None";
+  incomingUsername?: string;
+  outgoingMailServer: string;
+  outgoingMailPort?: number;
+  outgoingUseSsl?: boolean;
+  outgoingAuthentication?: "Password" | "None";
+  outgoingUsername?: string;
+  preventMove?: boolean;
+  preventAppSheet?: boolean;
+  disableMailDrop?: boolean;
+}) {
+  const req = ["accountDescription", "emailAddress", "incomingMailServer", "outgoingMailServer"] as const;
+  for (const k of req) if (!String((input as Record<string, unknown>)[k] ?? "").trim()) fail("VALIDATION_FAILED", `${k} is required`);
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(input.emailAddress)) fail("VALIDATION_FAILED", "emailAddress is not valid");
+  const type = input.accountType ?? "IMAP";
+  if (!IOS_EMAIL_PROTOCOLS.includes(type)) fail("VALIDATION_FAILED", `accountType must be IMAP or POP`);
+  return {
+    email_account_description: input.accountDescription.trim(),
+    email_account_type: `EmailType${type}`,
+    user_display_name: input.userDisplayName ?? input.emailAddress,
+    email_address: input.emailAddress.trim(),
+    incoming_mail_server_hostname: input.incomingMailServer.trim(),
+    incoming_mail_server_port: input.incomingMailPort ?? (type === "IMAP" ? 993 : 995),
+    incoming_mail_server_use_ssl: input.incomingUseSsl ?? true,
+    incoming_mail_server_authentication: `EmailAuth${input.incomingAuthentication ?? "Password"}`,
+    incoming_mail_server_username: input.incomingUsername ?? input.emailAddress,
+    outgoing_mail_server_hostname: input.outgoingMailServer.trim(),
+    outgoing_mail_server_port: input.outgoingMailPort ?? 587,
+    outgoing_mail_server_use_ssl: input.outgoingUseSsl ?? true,
+    outgoing_mail_server_authentication: `EmailAuth${input.outgoingAuthentication ?? "Password"}`,
+    outgoing_mail_server_username: input.outgoingUsername ?? input.emailAddress,
+    prevent_move: input.preventMove ?? false,
+    prevent_app_sheet: input.preventAppSheet ?? false,
+    disable_mail_recents_syncing: input.disableMailDrop ?? false,
+  };
+}
+
+// ------------------------------------------------------- iOS Global HTTP Proxy
+export function buildIosProxyPayload(input: {
+  proxyType: "manual" | "auto";
+  server?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  pacUrl?: string;
+  allowBypass?: boolean;
+}) {
+  if (input.proxyType === "manual") {
+    if (!input.server?.trim()) fail("VALIDATION_FAILED", "Proxy server is required");
+    if (!input.port || input.port < 1 || input.port > 65535) fail("VALIDATION_FAILED", "Proxy port must be 1–65535");
+    const p: Record<string, unknown> = {
+      proxy_type: "manual",
+      proxy_server: input.server.trim(),
+      proxy_server_port: input.port,
+      allow_bypass: input.allowBypass ?? false,
+    };
+    if (input.username) p.proxy_username = input.username;
+    if (input.password) p.proxy_password = input.password;
+    return p;
+  }
+  if (!input.pacUrl?.trim() || !/^https?:\/\//i.test(input.pacUrl)) fail("VALIDATION_FAILED", "PAC URL must be an http(s) URL");
+  return {
+    proxy_type: "auto",
+    proxy_pac_url: input.pacUrl.trim(),
+    allow_bypass: input.allowBypass ?? true,
   };
 }
 

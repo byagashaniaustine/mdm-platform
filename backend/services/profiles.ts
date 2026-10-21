@@ -12,7 +12,13 @@ import {
   buildFrpPayload,
   buildKioskPayload,
   buildPasscodePayload,
+  buildIosEmailPayload,
+  buildIosKioskPayload,
   buildIosPasscodePayload,
+  buildIosProxyPayload,
+  buildIosVpnPayload,
+  buildIosWebFilterPayload,
+  buildIosWifiPayload,
   buildRestrictionsPayload,
   IOS_AUTO_LOCK_MINUTES,
   IOS_RESTRICTIONS,
@@ -24,15 +30,31 @@ import type { Session } from "./auth.ts";
 import { raiseIfFailed, registerExecutor, submitOperation } from "./events.ts";
 import { getProfile, requireZohoId } from "./lookup.ts";
 
-export const PURPOSES: Purpose[] = ["restrictions", "kiosk", "passcode", "frp", "custom"];
+export const PURPOSES: Purpose[] = [
+  "restrictions",
+  "kiosk",
+  "passcode",
+  "frp",
+  "wifi",
+  "webfilter",
+  "vpn",
+  "email",
+  "proxy",
+  "custom",
+];
 
 export function profileCatalog() {
   return {
     purposes: [
       { id: "restrictions", label: "Restrictions", platforms: ["android", "ios"] },
-      { id: "kiosk", label: "Kiosk mode", platforms: ["android"] },
+      { id: "kiosk", label: "Kiosk mode", platforms: ["android", "ios"] },
       { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android", "ios"] },
       { id: "frp", label: "Factory Reset Protection accounts", platforms: ["android"] },
+      { id: "wifi", label: "Wi-Fi network", platforms: ["ios"] },
+      { id: "webfilter", label: "Web content filter (Safari)", platforms: ["ios"] },
+      { id: "vpn", label: "VPN", platforms: ["ios"] },
+      { id: "email", label: "Email account (IMAP / POP)", platforms: ["ios"] },
+      { id: "proxy", label: "Global HTTP proxy", platforms: ["ios"] },
       { id: "custom", label: "Custom payload (raw JSON from the guide)", platforms: ["android", "ios"] },
     ],
     restrictions: ANDROID_RESTRICTIONS,
@@ -42,8 +64,115 @@ export function profileCatalog() {
 
 /** Turn the dashboard form into { payloadName: body }. */
 export function buildPayload(platform: "android" | "ios", purpose: Purpose, config: Record<string, unknown>) {
-  if (platform === "ios" && !["restrictions", "passcode", "custom"].includes(purpose)) {
-    fail("VALIDATION_FAILED", "For Apple devices choose Restrictions, Passcode or Custom");
+  const IOS_ALLOWED = ["restrictions", "passcode", "kiosk", "wifi", "webfilter", "vpn", "email", "proxy", "custom"];
+  if (platform === "ios" && !IOS_ALLOWED.includes(purpose)) {
+    fail("VALIDATION_FAILED", `For Apple devices choose one of: ${IOS_ALLOWED.join(", ")}`);
+  }
+  if (platform === "ios" && purpose === "kiosk") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosKioskPayload({
+        mode: config.mode === "multi" ? "multi" : "single",
+        bundleIdentifier: config.bundleIdentifier as string | undefined,
+        bundleIdentifiers: config.bundleIdentifiers as string[] | undefined,
+        disableTouch: config.disableTouch as boolean | undefined,
+        disableDeviceRotation: config.disableDeviceRotation as boolean | undefined,
+        disableVolumeButtons: config.disableVolumeButtons as boolean | undefined,
+        disableRingerSwitch: config.disableRingerSwitch as boolean | undefined,
+        disableSleepWakeButton: config.disableSleepWakeButton as boolean | undefined,
+        disableAutoLock: config.disableAutoLock as boolean | undefined,
+        enableVoiceOver: config.enableVoiceOver as boolean | undefined,
+        enableZoom: config.enableZoom as boolean | undefined,
+        enableInvertColors: config.enableInvertColors as boolean | undefined,
+        enableAssistiveTouch: config.enableAssistiveTouch as boolean | undefined,
+        enableSpeakSelection: config.enableSpeakSelection as boolean | undefined,
+        enableMonoAudio: config.enableMonoAudio as boolean | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "wifi") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosWifiPayload({
+        ssid: config.ssid as string,
+        encryption: config.encryption as "WEP" | "WPA" | "WPA2" | "Any" | "None" | undefined,
+        password: config.password as string | undefined,
+        hiddenNetwork: config.hiddenNetwork as boolean | undefined,
+        autoJoin: config.autoJoin as boolean | undefined,
+        proxyType: config.proxyType as "None" | "Manual" | "Auto" | undefined,
+        proxyServer: config.proxyServer as string | undefined,
+        proxyPort: config.proxyPort as number | undefined,
+        proxyUser: config.proxyUser as string | undefined,
+        proxyPassword: config.proxyPassword as string | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "webfilter") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosWebFilterPayload({
+        mode: config.mode === "allow-only" ? "allow-only" : "limit-adult",
+        allowedUrls: config.allowedUrls as { title: string; url: string }[] | undefined,
+        permittedUrls: config.permittedUrls as string[] | undefined,
+        blacklistedUrls: config.blacklistedUrls as string[] | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "vpn") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosVpnPayload({
+        connectionName: config.connectionName as string,
+        type: config.type as "L2TP" | "PPTP" | "IPSec" | "IKEv2" | "AlwaysOn" | undefined,
+        server: config.server as string,
+        account: config.account as string | undefined,
+        password: config.password as string | undefined,
+        sharedSecret: config.sharedSecret as string | undefined,
+        authentication: config.authentication as "Password" | "RSA" | "Certificate" | undefined,
+        sendAllTraffic: config.sendAllTraffic as boolean | undefined,
+        disconnectOnIdle: config.disconnectOnIdle as boolean | undefined,
+        proxyServer: config.proxyServer as string | undefined,
+        proxyPort: config.proxyPort as number | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "email") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosEmailPayload({
+        accountDescription: config.accountDescription as string,
+        accountType: config.accountType as "IMAP" | "POP" | undefined,
+        userDisplayName: config.userDisplayName as string | undefined,
+        emailAddress: config.emailAddress as string,
+        incomingMailServer: config.incomingMailServer as string,
+        incomingMailPort: config.incomingMailPort as number | undefined,
+        incomingUseSsl: config.incomingUseSsl as boolean | undefined,
+        incomingAuthentication: config.incomingAuthentication as "Password" | "None" | undefined,
+        incomingUsername: config.incomingUsername as string | undefined,
+        outgoingMailServer: config.outgoingMailServer as string,
+        outgoingMailPort: config.outgoingMailPort as number | undefined,
+        outgoingUseSsl: config.outgoingUseSsl as boolean | undefined,
+        outgoingAuthentication: config.outgoingAuthentication as "Password" | "None" | undefined,
+        outgoingUsername: config.outgoingUsername as string | undefined,
+        preventMove: config.preventMove as boolean | undefined,
+        preventAppSheet: config.preventAppSheet as boolean | undefined,
+        disableMailDrop: config.disableMailDrop as boolean | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "proxy") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosProxyPayload({
+        proxyType: config.proxyType === "auto" ? "auto" : "manual",
+        server: config.server as string | undefined,
+        port: config.port as number | undefined,
+        username: config.username as string | undefined,
+        password: config.password as string | undefined,
+        pacUrl: config.pacUrl as string | undefined,
+        allowBypass: config.allowBypass as boolean | undefined,
+      }),
+    };
   }
   if (platform === "ios" && purpose === "passcode") {
     return {

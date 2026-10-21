@@ -76,6 +76,18 @@ function profileWizard(el, ctx, catalog, existing) {
     const kind = purpose.value;
     if (kind === "passcode" && plat() === "ios") {
       renderIosPasscode();
+    } else if (kind === "kiosk" && plat() === "ios") {
+      renderIosKiosk();
+    } else if (kind === "wifi" && plat() === "ios") {
+      renderIosWifi();
+    } else if (kind === "webfilter" && plat() === "ios") {
+      renderIosWebFilter();
+    } else if (kind === "vpn" && plat() === "ios") {
+      renderIosVpn();
+    } else if (kind === "email" && plat() === "ios") {
+      renderIosEmail();
+    } else if (kind === "proxy" && plat() === "ios") {
+      renderIosProxy();
     } else if (kind === "restrictions") {
       const restrictionList = plat() === "ios" ? catalog.ios.restrictions : catalog.restrictions;
       // Per restriction kind: binary / enum use <select>, integer uses <input type=number>,
@@ -327,6 +339,293 @@ function profileWizard(el, ctx, catalog, existing) {
       };
     }
   };
+  function renderIosKiosk() {
+    const mode = select([{ value: "single", label: "Single app" }, { value: "multi", label: "Multiple apps" }]);
+    const bundleId = input({ placeholder: "com.acme.pos" });
+    const multiList = h("textarea", { rows: 5, class: "mono", placeholder: "com.acme.pos\ncom.acme.scanner" });
+    const singleWrap = h("div", { class: "stack" }, field("Bundle identifier", bundleId, "The one app the device is locked to (from App Store or your custom app)."));
+    const multiWrap = h("div", { class: "stack", style: "display:none" }, field("Allowed bundle IDs (one per line)", multiList, "The apps allowed to run in kiosk. Apple implements this via Autonomous Single App Mode."));
+    const toggleMode = () => {
+      singleWrap.style.display = mode.value === "single" ? "" : "none";
+      multiWrap.style.display = mode.value === "multi" ? "" : "none";
+    };
+    mode.addEventListener("change", toggleMode);
+
+    const disableTouch = h("input", { type: "checkbox" });
+    const disableRotation = h("input", { type: "checkbox" });
+    const disableVolume = h("input", { type: "checkbox" });
+    const disableRinger = h("input", { type: "checkbox" });
+    const disableSleep = h("input", { type: "checkbox" });
+    const disableAutoLock = h("input", { type: "checkbox", checked: true });
+    const voiceOver = h("input", { type: "checkbox" });
+    const zoom = h("input", { type: "checkbox" });
+    const invert = h("input", { type: "checkbox" });
+    const assistive = h("input", { type: "checkbox" });
+    const speakSel = h("input", { type: "checkbox" });
+    const monoAudio = h("input", { type: "checkbox" });
+
+    const checkbox = (el, label) => h("label", { class: "pick" }, el, h("span", {}, label));
+
+    const lockdown = h("button", { class: "btn btn-sm", type: "button", onclick: () => {
+      mode.value = "single"; toggleMode();
+      disableTouch.checked = false; disableRotation.checked = true;
+      disableVolume.checked = true; disableRinger.checked = true;
+      disableSleep.checked = true; disableAutoLock.checked = true;
+      toast("Lockdown preset applied", "info");
+    } }, "Use lockdown preset");
+
+    clear(formBox,
+      h("p", { class: "muted small" }, "iOS kiosk is supervised-only (requires Apple Business Manager / Apple Configurator)."),
+      field("Mode", mode),
+      singleWrap,
+      multiWrap,
+      h("div", { class: "row" }, h("h3", {}, "Device behavior"), lockdown),
+      h("h4", { class: "section-head" }, "hardware"),
+      h("div", { class: "restrictions" },
+        checkbox(disableTouch, "Disable touch screen"),
+        checkbox(disableRotation, "Disable auto-rotation"),
+        checkbox(disableVolume, "Disable volume buttons"),
+        checkbox(disableRinger, "Disable ringer switch"),
+        checkbox(disableSleep, "Disable sleep/wake button"),
+        checkbox(disableAutoLock, "Disable auto-lock (screen stays on)"),
+      ),
+      h("h4", { class: "section-head" }, "accessibility (visible as toggles in kiosk)"),
+      h("div", { class: "restrictions" },
+        checkbox(voiceOver, "VoiceOver"),
+        checkbox(zoom, "Zoom"),
+        checkbox(invert, "Invert colors"),
+        checkbox(assistive, "AssistiveTouch"),
+        checkbox(speakSel, "Speak Selection"),
+        checkbox(monoAudio, "Mono Audio"),
+      ),
+    );
+    collect = () => ({
+      mode: mode.value,
+      bundleIdentifier: bundleId.value.trim(),
+      bundleIdentifiers: multiList.value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+      disableTouch: disableTouch.checked,
+      disableDeviceRotation: disableRotation.checked,
+      disableVolumeButtons: disableVolume.checked,
+      disableRingerSwitch: disableRinger.checked,
+      disableSleepWakeButton: disableSleep.checked,
+      disableAutoLock: disableAutoLock.checked,
+      enableVoiceOver: voiceOver.checked,
+      enableZoom: zoom.checked,
+      enableInvertColors: invert.checked,
+      enableAssistiveTouch: assistive.checked,
+      enableSpeakSelection: speakSel.checked,
+      enableMonoAudio: monoAudio.checked,
+    });
+  }
+
+  function renderIosWifi() {
+    const ssid = input({ placeholder: "Office-WiFi" });
+    const enc = select([{ value: "WPA2", label: "WPA2 / WPA3 Personal" }, { value: "WPA", label: "WPA Personal" }, { value: "WEP", label: "WEP" }, { value: "Any", label: "Any" }, { value: "None", label: "Open (no password)" }]);
+    const pw = input({ type: "password", placeholder: "Wi-Fi password" });
+    const hidden = h("input", { type: "checkbox" });
+    const autoJoin = h("input", { type: "checkbox", checked: true });
+    const proxyType = select([{ value: "None", label: "No proxy" }, { value: "Manual", label: "Manual" }, { value: "Auto", label: "Automatic (PAC)" }]);
+    const proxyServer = input({ placeholder: "proxy.company.local" });
+    const proxyPort = input({ type: "number", min: 1, max: 65535, placeholder: "8080" });
+    const proxyUser = input({ placeholder: "optional" });
+    const proxyPass = input({ type: "password", placeholder: "optional" });
+    const proxyWrap = h("div", { class: "stack", style: "display:none" },
+      field("Proxy server", proxyServer),
+      field("Proxy port", proxyPort),
+      field("Proxy username", proxyUser),
+      field("Proxy password", proxyPass),
+    );
+    proxyType.addEventListener("change", () => {
+      proxyWrap.style.display = proxyType.value === "Manual" ? "" : "none";
+    });
+    clear(formBox,
+      field("Network name (SSID)", ssid),
+      field("Security", enc),
+      field("Password", pw),
+      h("label", { class: "pick" }, hidden, h("span", {}, "Hidden network (SSID not broadcast)")),
+      h("label", { class: "pick" }, autoJoin, h("span", {}, "Auto-join this network")),
+      field("Proxy", proxyType),
+      proxyWrap,
+    );
+    collect = () => ({
+      ssid: ssid.value.trim(),
+      encryption: enc.value,
+      password: pw.value,
+      hiddenNetwork: hidden.checked,
+      autoJoin: autoJoin.checked,
+      proxyType: proxyType.value,
+      proxyServer: proxyServer.value.trim(),
+      proxyPort: proxyPort.value ? Number(proxyPort.value) : undefined,
+      proxyUser: proxyUser.value.trim(),
+      proxyPassword: proxyPass.value,
+    });
+  }
+
+  function renderIosWebFilter() {
+    const mode = select([{ value: "limit-adult", label: "Limit adult content (Apple's filter + custom lists)" }, { value: "allow-only", label: "Allow specific websites only" }]);
+    const allowed = h("textarea", { rows: 6, class: "mono", placeholder: "https://docs.company.com\nhttps://portal.company.com" });
+    const blocked = h("textarea", { rows: 4, class: "mono", placeholder: "https://news.example.com" });
+    const bookmarks = h("textarea", { rows: 4, class: "mono", placeholder: "Company Portal | https://portal.company.com\nSupport | https://help.company.com" });
+    const allowOnlyWrap = h("div", { class: "stack", style: "display:none" }, field("Permitted URLs (one per line)", allowed, "Only these URLs load in Safari."));
+    const limitWrap = h("div", { class: "stack" }, field("Blocked URLs (one per line)", blocked, "In addition to Apple's auto-adult filter."));
+    const toggle = () => {
+      allowOnlyWrap.style.display = mode.value === "allow-only" ? "" : "none";
+      limitWrap.style.display = mode.value === "limit-adult" ? "" : "none";
+    };
+    mode.addEventListener("change", toggle);
+    clear(formBox,
+      h("p", { class: "muted small" }, "Supervised-only. Shapes Safari browsing on managed iPads/iPhones."),
+      field("Mode", mode),
+      allowOnlyWrap,
+      limitWrap,
+      field("Bookmarks (one per line: Title | URL)", bookmarks),
+    );
+    const parseBm = (txt) => txt.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [t, u] = l.split("|").map((s) => (s || "").trim());
+      return u ? { title: t, url: u } : { title: t, url: t };
+    });
+    collect = () => ({
+      mode: mode.value,
+      permittedUrls: mode.value === "allow-only" ? allowed.value.split("\n").map((s) => s.trim()).filter(Boolean) : undefined,
+      blacklistedUrls: mode.value === "limit-adult" ? blocked.value.split("\n").map((s) => s.trim()).filter(Boolean) : undefined,
+      allowedUrls: parseBm(bookmarks.value),
+    });
+  }
+
+  function renderIosVpn() {
+    const name = input({ placeholder: "Office VPN" });
+    const type = select([{ value: "IKEv2", label: "IKEv2" }, { value: "IPSec", label: "IPSec (Cisco)" }, { value: "L2TP", label: "L2TP" }, { value: "PPTP", label: "PPTP" }, { value: "AlwaysOn", label: "Always-On (supervised)" }]);
+    const server = input({ placeholder: "vpn.company.co.tz" });
+    const account = input({ placeholder: "username" });
+    const pw = input({ type: "password", placeholder: "password" });
+    const secret = input({ type: "password", placeholder: "shared secret / PSK" });
+    const auth = select([{ value: "Password", label: "Password" }, { value: "RSA", label: "RSA SecurID" }, { value: "Certificate", label: "Certificate" }]);
+    const sendAll = h("input", { type: "checkbox", checked: true });
+    const idle = h("input", { type: "checkbox" });
+    const proxyServer = input({ placeholder: "optional proxy" });
+    const proxyPort = input({ type: "number", min: 1, max: 65535, placeholder: "optional" });
+    clear(formBox,
+      field("Connection name", name),
+      field("Type", type),
+      field("Server", server),
+      field("User authentication", auth),
+      field("Account", account),
+      field("Password", pw),
+      field("Shared secret / PSK", secret),
+      h("label", { class: "pick" }, sendAll, h("span", {}, "Send all traffic over VPN")),
+      h("label", { class: "pick" }, idle, h("span", {}, "Disconnect when idle")),
+      field("Proxy server", proxyServer),
+      field("Proxy port", proxyPort),
+    );
+    collect = () => ({
+      connectionName: name.value.trim(),
+      type: type.value,
+      server: server.value.trim(),
+      account: account.value.trim(),
+      password: pw.value,
+      sharedSecret: secret.value,
+      authentication: auth.value,
+      sendAllTraffic: sendAll.checked,
+      disconnectOnIdle: idle.checked,
+      proxyServer: proxyServer.value.trim() || undefined,
+      proxyPort: proxyPort.value ? Number(proxyPort.value) : undefined,
+    });
+  }
+
+  function renderIosEmail() {
+    const descr = input({ placeholder: "Work mail" });
+    const type = select([{ value: "IMAP", label: "IMAP" }, { value: "POP", label: "POP" }]);
+    const displayName = input({ placeholder: "Jane Doe" });
+    const addr = input({ type: "email", placeholder: "jane@company.co.tz" });
+    const inHost = input({ placeholder: "imap.company.co.tz" });
+    const inPort = input({ type: "number", min: 1, max: 65535, value: 993 });
+    const inSsl = h("input", { type: "checkbox", checked: true });
+    const inAuth = select([{ value: "Password", label: "Password" }, { value: "None", label: "None" }]);
+    const inUser = input({ placeholder: "same as email by default" });
+    const outHost = input({ placeholder: "smtp.company.co.tz" });
+    const outPort = input({ type: "number", min: 1, max: 65535, value: 587 });
+    const outSsl = h("input", { type: "checkbox", checked: true });
+    const outAuth = select([{ value: "Password", label: "Password" }, { value: "None", label: "None" }]);
+    const outUser = input({ placeholder: "same as email by default" });
+    const preventMove = h("input", { type: "checkbox" });
+    const preventSheet = h("input", { type: "checkbox" });
+    const noDrop = h("input", { type: "checkbox" });
+    clear(formBox,
+      field("Account description", descr),
+      field("Protocol", type),
+      field("Display name", displayName),
+      field("Email address", addr),
+      h("h4", { class: "section-head" }, "incoming server"),
+      field("Host", inHost),
+      field("Port", inPort),
+      h("label", { class: "pick" }, inSsl, h("span", {}, "Use SSL")),
+      field("Authentication", inAuth),
+      field("Username", inUser),
+      h("h4", { class: "section-head" }, "outgoing server"),
+      field("Host", outHost),
+      field("Port", outPort),
+      h("label", { class: "pick" }, outSsl, h("span", {}, "Use SSL")),
+      field("Authentication", outAuth),
+      field("Username", outUser),
+      h("h4", { class: "section-head" }, "restrictions"),
+      h("label", { class: "pick" }, preventMove, h("span", {}, "Prevent moving messages to other accounts")),
+      h("label", { class: "pick" }, preventSheet, h("span", {}, "Prevent sending from third-party apps")),
+      h("label", { class: "pick" }, noDrop, h("span", {}, "Disable Mail Drop")),
+    );
+    collect = () => ({
+      accountDescription: descr.value.trim(),
+      accountType: type.value,
+      userDisplayName: displayName.value.trim() || undefined,
+      emailAddress: addr.value.trim(),
+      incomingMailServer: inHost.value.trim(),
+      incomingMailPort: Number(inPort.value),
+      incomingUseSsl: inSsl.checked,
+      incomingAuthentication: inAuth.value,
+      incomingUsername: inUser.value.trim() || undefined,
+      outgoingMailServer: outHost.value.trim(),
+      outgoingMailPort: Number(outPort.value),
+      outgoingUseSsl: outSsl.checked,
+      outgoingAuthentication: outAuth.value,
+      outgoingUsername: outUser.value.trim() || undefined,
+      preventMove: preventMove.checked,
+      preventAppSheet: preventSheet.checked,
+      disableMailDrop: noDrop.checked,
+    });
+  }
+
+  function renderIosProxy() {
+    const mode = select([{ value: "manual", label: "Manual (server + port)" }, { value: "auto", label: "Automatic (PAC URL)" }]);
+    const server = input({ placeholder: "proxy.company.local" });
+    const port = input({ type: "number", min: 1, max: 65535, placeholder: "8080" });
+    const user = input({ placeholder: "optional" });
+    const pw = input({ type: "password", placeholder: "optional" });
+    const pac = input({ placeholder: "https://proxy.company.local/wpad.dat" });
+    const bypass = h("input", { type: "checkbox", checked: true });
+    const manualWrap = h("div", { class: "stack" }, field("Server", server), field("Port", port), field("Username", user), field("Password", pw));
+    const autoWrap = h("div", { class: "stack", style: "display:none" }, field("PAC URL", pac, "Where the device fetches its proxy auto-config."));
+    const toggle = () => {
+      manualWrap.style.display = mode.value === "manual" ? "" : "none";
+      autoWrap.style.display = mode.value === "auto" ? "" : "none";
+    };
+    mode.addEventListener("change", toggle);
+    clear(formBox,
+      h("p", { class: "muted small" }, "Supervised-only. Forces all HTTP traffic on the device through a proxy."),
+      field("Proxy type", mode),
+      manualWrap,
+      autoWrap,
+      h("label", { class: "pick" }, bypass, h("span", {}, "Allow bypassing the proxy to access captive networks")),
+    );
+    collect = () => ({
+      proxyType: mode.value,
+      server: server.value.trim(),
+      port: port.value ? Number(port.value) : undefined,
+      username: user.value.trim() || undefined,
+      password: pw.value || undefined,
+      pacUrl: pac.value.trim(),
+      allowBypass: bypass.checked,
+    });
+  }
+
   function renderIosPasscode() {
     const simple = h("input", { type: "checkbox" });
     const alnum = h("input", { type: "checkbox" });
