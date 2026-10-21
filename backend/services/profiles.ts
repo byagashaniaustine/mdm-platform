@@ -283,8 +283,27 @@ export async function createProfile(s: Session, input: {
       created_by: s.adminId,
     }).select("id").single(),
   );
-  const { event } = await op(s, "profile.create", row.id, {}, idem);
-  return { profileId: row.id, event };
+  try {
+    const { event } = await op(s, "profile.create", row.id, {}, idem);
+    return { profileId: row.id, event };
+  } catch (err) {
+    // Zoho rejected it (payload type unknown, bad field, etc.). Don't leave a
+    // half-baked draft and an orphaned Zoho shell behind: soft-delete the local
+    // row and best-effort delete the Zoho shell if ensureZohoProfile managed
+    // to create one before the payload-add failed.
+    const after = await run<{ zoho_profile_id: string | null }>(
+      db().from("profiles").select("zoho_profile_id").eq("id", row.id).single(),
+    );
+    await run(db().from("profiles").update({ state: "deleted" }).eq("id", row.id));
+    if (after.zoho_profile_id) {
+      await zoho.deleteProfiles(s.enterpriseId, [after.zoho_profile_id]).catch(() => {
+        // Can't delete from Zoho (not in trash yet / other error). Not fatal —
+        // the local row is already hidden, and the shell can be cleaned from
+        // the Zoho console manually.
+      });
+    }
+    throw err;
+  }
 }
 
 /** Add another policy to an existing profile (e.g. passcode + restrictions together). */
