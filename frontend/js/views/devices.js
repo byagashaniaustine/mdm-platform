@@ -177,6 +177,7 @@ export async function deviceDetailView(el, ctx, id) {
   const reload = () => deviceDetailView(el, ctx, id);
   const historyBox = h("div");
   const appsBox = h("div");
+  const blacklistBox = h("div", {}, loading());
 
   const facts = [
     ["Platform", platformName(d.platform)],
@@ -249,6 +250,15 @@ export async function deviceDetailView(el, ctx, id) {
           appsBox,
         ),
         h("section", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", {}, "App blocks on this device"),
+            ctx.can("admin")
+              ? h("button", { class: "btn btn-sm", type: "button", onclick: () => openBlacklistModal(id, d, () => refreshBlacklist(id, ctx, blacklistBox)) }, "Block an app")
+              : null,
+          ),
+          h("p", { class: "muted small" }, "Blocks that apply only to this phone. Group-wide blocks are managed on the group's page."),
+          blacklistBox,
+        ),
+        h("section", { class: "card" },
           h("div", { class: "card-head" }, h("h2", {}, "Recent events"), h("a", { href: "#/activity" }, "All activity")),
           d.events.length
             ? h("ul", { class: "feed" }, d.events.slice(0, 15).map((e) => h("li", {}, STATE_TEXT[e.state] ? badge(STATE_TEXT[e.state], e.state === "awaiting_confirmation" ? "warn" : "info") : badge(e.state), h("span", { class: "feed-action" }, e.action.replace(/_/g, " ")), e.error_message ? h("span", { class: "muted small" }, e.error_message) : null, h("span", { class: "muted feed-time" }, ago(e.action_time)))))
@@ -282,6 +292,97 @@ export async function deviceDetailView(el, ctx, id) {
       ),
     ),
   );
+  refreshBlacklist(id, ctx, blacklistBox);
+}
+
+const BLACKLIST_PLATFORM_CODE = { android: 2, ios: 1, windows: 3 };
+
+async function refreshBlacklist(id, ctx, box) {
+  clear(box, loading());
+  try {
+    const s = await get(`/api/devices/${id}/blacklist`);
+    const direct = s.direct ?? [];
+    const viaGroups = s.via_groups ?? [];
+    const parts = [];
+    if (viaGroups.length) {
+      const names = [...new Set(viaGroups.map((v) => v.group_name))];
+      parts.push(h("p", { class: "muted small" }, `${viaGroups.length} app${viaGroups.length === 1 ? "" : "s"} also blocked via ${names.length === 1 ? "group" : "groups"}: ${names.join(", ")}. Manage those on the group page.`));
+    }
+    if (direct.length) {
+      parts.push(h("ul", { class: "list" }, direct.map((a) => h("li", {},
+        h("strong", {}, a.appname),
+        h("span", { class: "muted small" }, ` · ${a.identifier}`),
+        ctx.can("admin")
+          ? h("button", { class: "btn btn-xs btn-ghost", type: "button", style: "margin-left: auto", onclick: async () => {
+            try {
+              toastEvent(await post(`/api/devices/${id}/blacklist/remove`, { appGroupIds: [a.app_group_id] }), "Unblocked");
+              refreshBlacklist(id, ctx, box);
+            } catch (err) { toastError(err); }
+          } }, "Unblock")
+          : null,
+      ))));
+    } else if (!viaGroups.length) {
+      parts.push(h("p", { class: "muted" }, "No apps are blocked on this device."));
+    } else {
+      parts.push(h("p", { class: "muted small" }, "No device-specific blocks."));
+    }
+    clear(box, ...parts);
+  } catch (err) {
+    clear(box, h("p", { class: "muted small" }, "Could not load blocks."));
+    toastError(err);
+  }
+}
+
+async function openBlacklistModal(id, device, onDone) {
+  const listBox = h("div", {}, loading());
+  const picks = [];
+  try {
+    const apps = await get(`/api/devices/${id}/apps`);
+    for (const a of apps ?? []) {
+      const cb = h("input", { type: "checkbox" });
+      picks.push({ cb, read: () => ({
+        identifier: a.identifier,
+        platform: BLACKLIST_PLATFORM_CODE[a.platform_type] ?? BLACKLIST_PLATFORM_CODE[device.platform] ?? 2,
+        appname: a.app_name ?? a.identifier,
+      }), label: `${a.app_name ?? a.identifier} · ${a.identifier ?? ""}` });
+    }
+    clear(listBox, picks.length
+      ? h("ul", { class: "list stack" }, picks.map((p) => h("li", {},
+        h("label", { class: "pick" }, p.cb, h("span", {}, p.label)))))
+      : h("p", { class: "muted small" }, "No installed apps reported for this device yet. Fetch installed apps first, or add a package manually below."));
+  } catch {
+    clear(listBox, h("p", { class: "muted small" }, "Could not load installed apps."));
+  }
+
+  const manualName = input({ placeholder: "App name (optional)" });
+  const manualPkg = input({ placeholder: "e.g. com.example.app" });
+  const manualPlatform = select([{ value: "2", label: "Android" }, { value: "1", label: "iOS" }, { value: "3", label: "Windows" }]);
+  if (device.platform === "ios") manualPlatform.value = "1";
+  if (device.platform === "windows") manualPlatform.value = "3";
+
+  modal("Block an app on this device", h("div", { class: "stack" },
+    h("p", { class: "muted small" }, "Takes effect only on this phone. If the app is already blocked by one of this device's groups, the request is rejected — remove it from the group first."),
+    listBox,
+    h("div", { class: "stack" },
+      h("h4", { class: "section-head" }, "Or add a package manually"),
+      field("App name", manualName),
+      field("Package identifier", manualPkg),
+      field("Platform", manualPlatform),
+    ),
+  ), [
+    { label: "Cancel" },
+    { label: "Block", tone: "danger", onClick: async () => {
+      const entries = picks.filter((p) => p.cb.checked).map((p) => p.read());
+      const pkg = manualPkg.value.trim();
+      if (pkg) {
+        entries.push({ identifier: pkg, platform: Number(manualPlatform.value), appname: manualName.value.trim() || pkg });
+      }
+      const valid = entries.filter((e) => /^[a-zA-Z][\w.]+$/.test(e.identifier));
+      if (!valid.length) throw Object.assign(new Error("Pick at least one app or enter a valid package identifier"), { code: "VALIDATION_FAILED" });
+      toastEvent(await post(`/api/devices/${id}/blacklist`, { apps: valid }), `Blocked ${valid.length} app${valid.length === 1 ? "" : "s"}`);
+      onDone?.();
+    } },
+  ]);
 }
 
 function runAction(device, action, done) {

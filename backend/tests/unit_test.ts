@@ -351,3 +351,30 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     assert.throws(() => buildPayload("ios", "frp", { accounts: [] }));
   });
 }
+
+// ----------------------------------------------- device-level app blacklist
+{
+  const { blacklistAppsOnDevice } = await import("../services/apps.ts");
+  // Validation runs synchronously before any DB access; a stub session is enough.
+  const s = { sessionId: "x", adminId: "x", enterpriseId: "x", enterpriseName: "", email: "", fullName: null, role: "admin" as const };
+  const good = { identifier: "com.example.app", platform: 2, appname: "Example" };
+
+  Deno.test("device blacklist rejects empty entries", async () => {
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", [], null), /at least one app/i);
+  });
+
+  Deno.test("device blacklist caps entries at 100", async () => {
+    const many = Array.from({ length: 101 }, (_, i) => ({ ...good, identifier: `com.example.a${i}` }));
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", many, null), /100 apps/);
+  });
+
+  Deno.test("device blacklist rejects malformed package identifiers", async () => {
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", [{ ...good, identifier: "has spaces" }], null), /Invalid package identifier/);
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", [{ ...good, identifier: "" }], null), /Invalid package identifier/);
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", [{ ...good, identifier: "1starts.with.digit" }], null), /Invalid package identifier/);
+  });
+
+  Deno.test("device blacklist rejects unknown platform codes", async () => {
+    await assert.rejects(() => blacklistAppsOnDevice(s, "d", [{ ...good, platform: 9 }], null), /Invalid platform code/);
+  });
+}

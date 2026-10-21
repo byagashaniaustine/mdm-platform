@@ -4,7 +4,7 @@ import { fail } from "../lib/errors.ts";
 import { obj, readJson, str, uuidList, uuidParam } from "../lib/validate.ts";
 import { type AppEnv, idempotencyKey, requireRole, requireSession } from "../middleware/auth.ts";
 import { confirmationTarget, confirmCommand, DEVICE_ACTIONS, deviceHasKiosk, deviceTag, requestCommand } from "../services/commands.ts";
-import { deviceInstalledApps } from "../services/apps.ts";
+import { blacklistAppsOnDevice, deviceBlacklistSummary, deviceInstalledApps, removeDeviceBlacklist } from "../services/apps.ts";
 import { clearDeviceCommands, recordAudit } from "../services/events.ts";
 import { removeDeviceFromAllGroups } from "../services/groups.ts";
 import { getDevice } from "../services/lookup.ts";
@@ -118,6 +118,27 @@ export function deviceRoutes() {
   r.get("/:id/apps", async (c) => {
     const data = await deviceInstalledApps(c.get("session"), uuidParam(c.req.param("id")));
     return c.json({ data });
+  });
+
+  // Device-specific app blocks. Groups remain the primary surface for blocking; this
+  // handles "block this one app on just this phone." Overlap with group blocklists is
+  // rejected at add time so Zoho's shared pair-table can't drop a direct block when the
+  // group block is lifted.
+  r.get("/:id/blacklist", async (c) => {
+    const data = await deviceBlacklistSummary(c.get("session"), uuidParam(c.req.param("id")));
+    return c.json({ data });
+  });
+  r.post("/:id/blacklist", requireRole("admin"), async (c) => {
+    const b = await readJson(c.req.raw);
+    if (!Array.isArray(b.apps) || !b.apps.length) fail("VALIDATION_FAILED", "apps[] required");
+    const { event } = await blacklistAppsOnDevice(c.get("session"), uuidParam(c.req.param("id")), b.apps, idempotencyKey(c));
+    return eventResponse(c, event);
+  });
+  r.post("/:id/blacklist/remove", requireRole("admin"), async (c) => {
+    const b = await readJson(c.req.raw);
+    const ids = Array.isArray(b.appGroupIds) ? b.appGroupIds.map(String).slice(0, 100) : [];
+    const { event } = await removeDeviceBlacklist(c.get("session"), uuidParam(c.req.param("id")), ids, idempotencyKey(c));
+    return eventResponse(c, event);
   });
 
   return r;

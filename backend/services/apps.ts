@@ -213,3 +213,158 @@ export async function deleteFromBlacklistRepo(s: Session, appGroupIds: string[])
   return await zoho.deleteBlacklistApp(s.enterpriseId, appGroupIds);
 }
 
+// --------------------------------------------------- device-specific blacklist
+// Groups remain the primary way to block apps; this layer is for "block app X
+// on just this one phone." Zoho's /blacklist/devices primitive is per-device,
+// so this is a direct call with resource_ids = [one device].
+//
+// Sharp edge: Zoho's pair-table doesn't record origin. If an app is blocked
+// both via a group AND directly on a device, Zoho stores one entry; removing
+// from the group also removes it from the device. We sidestep this at add
+// time by rejecting overlap (see blacklistAppsOnDevice).
+
+const deviceOp = (s: Session, action: string, deviceId: string, params: Record<string, unknown>, idem: string | null) =>
+  submitOperation({
+    enterpriseId: s.enterpriseId,
+    adminId: s.adminId,
+    category: "command",
+    action,
+    deviceId,
+    params,
+    idempotencyKey: idem,
+  }).then((r) => ({ ...r, event: raiseIfFailed(r.event) }));
+
+/** Running tally of appgroupids directly blocked on this device, from this device's events. */
+async function directlyBlockedAppGroupIds(enterpriseId: string, deviceId: string): Promise<Set<string>> {
+  const rows = await run<{ action: string; response: Record<string, unknown> | null }[]>(
+    db().from("events").select("action, response")
+      .eq("enterprise_id", enterpriseId).eq("device_id", deviceId)
+      .in("action", ["command.blacklist_apps", "command.remove_blacklist"])
+      .eq("state", "succeeded")
+      .order("action_time", { ascending: true }),
+  );
+  const blocked = new Set<string>();
+  for (const r of rows) {
+    const ids = ((r.response ?? {}) as { app_group_ids?: unknown }).app_group_ids;
+    const list = Array.isArray(ids) ? ids.map(String) : [];
+    if (r.action === "command.blacklist_apps") list.forEach((id) => blocked.add(id));
+    else list.forEach((id) => blocked.delete(id));
+  }
+  return blocked;
+}
+
+/** Appgroupids currently blocked via any of this device's groups (running tally per group). */
+async function groupBlockedAppGroupIds(enterpriseId: string, deviceId: string): Promise<Map<string, { groupId: string; groupName: string }>> {
+  type Row = { action: string; response: Record<string, unknown> | null; group_id: string; groups: { name?: string } | { name?: string }[] | null };
+  const memberships = await run<{ group_id: string }[]>(
+    db().from("group_devices").select("group_id").eq("device_id", deviceId),
+  );
+  const groupIds = memberships.map((m) => m.group_id);
+  if (!groupIds.length) return new Map();
+  const rows = await run<Row[]>(
+    db().from("events").select("action, response, group_id, groups(name)")
+      .eq("enterprise_id", enterpriseId).in("group_id", groupIds)
+      .in("action", ["group.blacklist_apps", "group.remove_blacklist"])
+      .eq("state", "succeeded")
+      .order("action_time", { ascending: true }),
+  );
+  // Per-group running set.
+  const perGroup = new Map<string, { name: string; blocked: Set<string> }>();
+  for (const r of rows) {
+    const name = (Array.isArray(r.groups) ? r.groups[0]?.name : r.groups?.name) ?? r.group_id;
+    const entry = perGroup.get(r.group_id) ?? { name, blocked: new Set<string>() };
+    const ids = ((r.response ?? {}) as { app_group_ids?: unknown }).app_group_ids;
+    const list = Array.isArray(ids) ? ids.map(String) : [];
+    if (r.action === "group.blacklist_apps") list.forEach((id) => entry.blocked.add(id));
+    else list.forEach((id) => entry.blocked.delete(id));
+    perGroup.set(r.group_id, entry);
+  }
+  const byAppGroupId = new Map<string, { groupId: string; groupName: string }>();
+  for (const [groupId, { name, blocked }] of perGroup) {
+    for (const id of blocked) if (!byAppGroupId.has(id)) byAppGroupId.set(id, { groupId, groupName: name });
+  }
+  return byAppGroupId;
+}
+
+export async function blacklistAppsOnDevice(s: Session, deviceId: string, entries: BlacklistEntry[], idem: string | null) {
+  if (!entries.length) fail("VALIDATION_FAILED", "Pick at least one app to blacklist");
+  if (entries.length > 100) fail("VALIDATION_FAILED", "Cannot block more than 100 apps in one request");
+  for (const e of entries) {
+    if (!e || typeof e.identifier !== "string" || !/^[a-zA-Z][\w.]+$/.test(e.identifier)) {
+      fail("VALIDATION_FAILED", `Invalid package identifier: ${e?.identifier ?? "(missing)"}`);
+    }
+    if (![1, 2, 3, 4].includes(Number(e.platform))) {
+      fail("VALIDATION_FAILED", `Invalid platform code for ${e.identifier} (expected 1=iOS, 2=Android, 3=Windows, 4=macOS)`);
+    }
+  }
+  await getDevice(s.enterpriseId, deviceId);
+  // Prevent overlap with group blocklists on this device (Zoho has no per-origin ledger).
+  const groupBlocks = await groupBlockedAppGroupIds(s.enterpriseId, deviceId);
+  const repo = ((await zoho.listBlacklistApps(s.enterpriseId)) as { apps?: { appgroupid?: string | number; identifier?: string }[] }).apps ?? [];
+  const idByIdentifier = new Map(repo.filter((a) => a.identifier && a.appgroupid).map((a) => [String(a.identifier), String(a.appgroupid!)]));
+  const clashes: string[] = [];
+  for (const e of entries) {
+    const existingId = idByIdentifier.get(e.identifier);
+    if (!existingId) continue;
+    const g = groupBlocks.get(existingId);
+    if (g) clashes.push(`${e.appname || e.identifier} (via group ${g.groupName})`);
+  }
+  if (clashes.length) {
+    fail("CONFLICT", `Already blocked: ${clashes.join(", ")}. Remove from the group first, or move this device to a group that doesn't block it.`);
+  }
+  return await deviceOp(s, "command.blacklist_apps", deviceId, { entries }, idem);
+}
+
+export async function removeDeviceBlacklist(s: Session, deviceId: string, appGroupIds: string[], idem: string | null) {
+  if (!appGroupIds.length) fail("VALIDATION_FAILED", "Pick at least one app to unblock");
+  await getDevice(s.enterpriseId, deviceId);
+  return await deviceOp(s, "command.remove_blacklist", deviceId, { app_group_ids: appGroupIds.map(String) }, idem);
+}
+
+/** Summary for the device page: direct blocks (unblockable here) + group-origin blocks (informational). */
+export async function deviceBlacklistSummary(s: Session, deviceId: string) {
+  await getDevice(s.enterpriseId, deviceId);
+  const [direct, viaGroups, repo] = await Promise.all([
+    directlyBlockedAppGroupIds(s.enterpriseId, deviceId),
+    groupBlockedAppGroupIds(s.enterpriseId, deviceId),
+    zoho.listBlacklistApps(s.enterpriseId) as Promise<{ apps?: { appgroupid?: string | number; identifier?: string; appname?: string; platform?: string | number }[] }>,
+  ]);
+  const byAppGroupId = new Map((repo.apps ?? []).filter((a) => a.appgroupid).map((a) => [String(a.appgroupid!), a]));
+  const describe = (id: string) => {
+    const a = byAppGroupId.get(id);
+    return { app_group_id: id, appname: a?.appname ?? a?.identifier ?? id, identifier: a?.identifier ?? "", platform: a?.platform ?? null };
+  };
+  return {
+    direct: [...direct].map(describe),
+    via_groups: [...viaGroups.entries()].map(([id, src]) => ({ ...describe(id), group_id: src.groupId, group_name: src.groupName })),
+  };
+}
+
+registerExecutor("command.blacklist_apps", async (ev) => {
+  const device = await getDevice(ev.enterprise_id, ev.device_id!);
+  const entries = ev.params.entries as BlacklistEntry[];
+  const addResp = await zoho.addBlacklistApp(ev.enterprise_id, entries) as { apps?: { appgroupid?: string | number; identifier?: string }[] };
+  const added = addResp.apps ?? [];
+  const existing = ((await zoho.listBlacklistApps(ev.enterprise_id)) as { apps?: { appgroupid?: string | number; identifier?: string }[] }).apps ?? [];
+  const byIdentifier = new Map<string, string>();
+  for (const row of [...existing, ...added]) {
+    if (row.identifier && row.appgroupid) byIdentifier.set(String(row.identifier), String(row.appgroupid));
+  }
+  const appGroupIds = entries.map((e) => byIdentifier.get(e.identifier)).filter((x): x is string => !!x);
+  if (!appGroupIds.length) fail("ZOHO_BAD_REQUEST", "Could not resolve appgroupids for blacklist entries");
+  await zoho.applyBlacklistToResources(ev.enterprise_id, [device.zoho_device_id], appGroupIds);
+  return { state: "succeeded", response: { blacklisted: appGroupIds.length, app_group_ids: appGroupIds } };
+});
+
+registerExecutor("command.remove_blacklist", async (ev) => {
+  const device = await getDevice(ev.enterprise_id, ev.device_id!);
+  const appGroupIds = (ev.params.app_group_ids as string[]).map(String);
+  try {
+    await zoho.removeBlacklistFromResources(ev.enterprise_id, [device.zoho_device_id], appGroupIds);
+  } catch (e) {
+    if ((e as { code?: string }).code !== "ZOHO_NOT_FOUND") throw e;
+    return { state: "succeeded", response: { unblocked: 0, app_group_ids: appGroupIds, note: "Was not blocked on this device" } };
+  }
+  return { state: "succeeded", response: { unblocked: appGroupIds.length, app_group_ids: appGroupIds } };
+});
+
