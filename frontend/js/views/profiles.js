@@ -509,7 +509,7 @@ function profileWizard(el, ctx, catalog, existing) {
     const checkbox = (el, label) => h("label", { class: "pick" }, el, h("span", {}, label));
 
     const lockdown = h("button", { class: "btn btn-sm", type: "button", onclick: () => {
-      mode.value = "single"; toggleMode();
+      mode.value = "single"; mode.dispatchEvent(new Event("change"));
       disableTouch.checked = false; disableRotation.checked = true;
       disableVolume.checked = true; disableRinger.checked = true;
       disableSleep.checked = true; disableAutoLock.checked = true;
