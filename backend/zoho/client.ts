@@ -206,9 +206,9 @@ function mapHttpError(status: number, text: string): AppError {
   if (status === 400 || status === 412 || status === 422) {
     return appError("ZOHO_BAD_REQUEST", friendly, { zoho: snippet });
   }
-  if (status === 401) return appError("ZOHO_UNAUTHORIZED", undefined, { zoho: snippet });
-  if (status === 403) return appError("ZOHO_SCOPE_MISMATCH", undefined, { zoho: snippet });
-  if (status === 404) return appError("ZOHO_NOT_FOUND", undefined, { zoho: snippet });
+  if (status === 401) return appError("ZOHO_UNAUTHORIZED", friendly, { zoho: snippet });
+  if (status === 403) return appError("ZOHO_SCOPE_MISMATCH", friendly, { zoho: snippet });
+  if (status === 404) return appError("ZOHO_NOT_FOUND", friendly, { zoho: snippet });
   if (status === 429) return appError("ZOHO_RATE_LIMITED");
   if (status >= 500) return appError("ZOHO_UNAVAILABLE", `Zoho returned ${status}`);
   return appError("ZOHO_BAD_REQUEST", `Zoho returned ${status}: ${friendly}`);
