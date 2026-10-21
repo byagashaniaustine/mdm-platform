@@ -50,11 +50,12 @@ export function profileCatalog() {
       { id: "kiosk", label: "Kiosk mode", platforms: ["android", "ios"] },
       { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android", "ios"] },
       { id: "frp", label: "Factory Reset Protection accounts", platforms: ["android"] },
-      { id: "wifi", label: "Wi-Fi network", platforms: ["ios"] },
-      { id: "webfilter", label: "Web content filter (Safari)", platforms: ["ios"] },
-      { id: "vpn", label: "VPN", platforms: ["ios"] },
-      { id: "email", label: "Email account (IMAP / POP)", platforms: ["ios"] },
-      { id: "proxy", label: "Global HTTP proxy", platforms: ["ios"] },
+      // iOS Wi-Fi, Web content filter, VPN, Email, Proxy are temporarily hidden from
+      // the UI: the builders I wrote had wrong Zoho field names (singleappmodepolicy,
+      // bundle_identifier, EmailType*, filter_type strings, etc.) and the guide shows
+      // completely different shapes. Rewriting each one properly needs a per-payload
+      // audit. In the meantime admins can use `custom` with the exact JSON from
+      // MDM_Dev_Guide.pdf for these payload types.
       { id: "custom", label: "Custom payload (raw JSON from the guide)", platforms: ["android", "ios"] },
     ],
     restrictions: ANDROID_RESTRICTIONS,
