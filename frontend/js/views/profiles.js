@@ -257,7 +257,7 @@ function profileWizard(el, ctx, catalog, existing) {
           pkg,
         );
       });
-      const renderCommonRows = (apps, taken) => apps.filter((a) => !taken.has(a.identifier)).map((a) => {
+      const renderCommonRows = (apps) => apps.map((a) => {
         const cb = h("input", { type: "checkbox" });
         const pkg = input({ placeholder: "package name", value: a.identifier });
         picks.push({ a: { app_id: `common-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
@@ -265,7 +265,7 @@ function profileWizard(el, ctx, catalog, existing) {
       });
       const commonSection = () => h("div", { class: "stack" },
         h("h4", { class: "section-head" }, "common apps"),
-        ...renderCommonRows(COMMON_ANDROID_APPS, new Set(picks.map((p) => p.pkg?.value).filter(Boolean))),
+        ...renderCommonRows(COMMON_ANDROID_APPS),
       );
 
       get("/api/apps").then(async (apps) => {
@@ -376,15 +376,24 @@ function profileWizard(el, ctx, catalog, existing) {
         ),
       );
 
-      collect = () => ({
-        mode: mode.value,
-        apps: picks
-          .filter((p) => p.cb.checked && p.pkg.value.trim())
-          .map((p) => ({
+      collect = () => {
+        // Dedup by packageName so the same bundle picked in two sections (installed + common) → one entry.
+        const seenPkg = new Set();
+        const apps = [];
+        for (const p of picks) {
+          if (!p.cb.checked) continue;
+          const pkg = p.pkg.value.trim();
+          if (!pkg || seenPkg.has(pkg)) continue;
+          seenPkg.add(pkg);
+          apps.push({
             appId: String(p.a.app_id),
-            packageName: p.pkg.value.trim(),
-            name: p.manual ? (p.name.value.trim() || p.pkg.value.trim()) : p.a.app_name,
-          })),
+            packageName: pkg,
+            name: p.manual ? (p.name.value.trim() || pkg) : p.a.app_name,
+          });
+        }
+        return ({
+        mode: mode.value,
+        apps,
         allowStatusBar: statusBar.checked,
         allowStatusBarExpansion: statusBarExpansion.checked,
         allowHomeButton: homeButton.checked,
@@ -403,6 +412,7 @@ function profileWizard(el, ctx, catalog, existing) {
         screenOrientation: Number(orientation.value),
         screenTimeout: Number(timeout.value),
       });
+      };
     } else if (kind === "passcode") {
       const type = select([{ value: "2", label: "Numbers" }, { value: "4", label: "Alphanumeric" }, { value: "5", label: "Complex" }]);
       const len = input({ type: "number", min: 4, max: 16, value: 6 });
@@ -493,7 +503,7 @@ function profileWizard(el, ctx, catalog, existing) {
         pkg,
       );
     });
-    const renderCommonRows = (apps, taken) => apps.filter((a) => !taken.has(a.identifier)).map((a) => {
+    const renderCommonRows = (apps) => apps.map((a) => {
       const cb = h("input", { type: "checkbox" });
       const pkg = input({ placeholder: "bundle identifier", value: a.identifier });
       picks.push({ a: { app_id: `common-${a.identifier}`, app_name: a.app_name }, cb, pkg, manual: false });
@@ -501,7 +511,7 @@ function profileWizard(el, ctx, catalog, existing) {
     });
     const commonSection = () => h("div", { class: "stack" },
       h("h4", { class: "section-head" }, "common apps"),
-      ...renderCommonRows(COMMON_IOS_APPS, new Set(picks.map((p) => p.pkg?.value).filter(Boolean))),
+      ...renderCommonRows(COMMON_IOS_APPS),
     );
 
     get("/api/apps").then(async (apps) => {
@@ -595,9 +605,10 @@ function profileWizard(el, ctx, catalog, existing) {
       ),
     );
     collect = () => {
-      const chosen = picks
+      // Dedup by bundle: same identifier picked in two sections (e.g. installed + common) → one entry.
+      const chosen = [...new Set(picks
         .filter((p) => p.cb.checked && p.pkg.value.trim())
-        .map((p) => p.pkg.value.trim());
+        .map((p) => p.pkg.value.trim()))];
       if (mode.value === "single" && chosen.length !== 1) {
         throw Object.assign(new Error("Single-app kiosk needs exactly one app picked"), { code: "VALIDATION_FAILED" });
       }
