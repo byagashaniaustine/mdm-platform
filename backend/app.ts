@@ -46,7 +46,8 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
         styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
         // OpenStreetMap tile servers (a/b/c subdomains).
         imgSrc: ["'self'", "data:", "blob:", "https://*.tile.openstreetmap.org"],
-        connectSrc: ["'self'"],
+        // unpkg: Leaflet fetches its own sourcemap when DevTools is open.
+        connectSrc: ["'self'", "https://unpkg.com"],
         frameAncestors: ["'none'"],
         formAction: ["'self'"],
         baseUri: ["'self'"],

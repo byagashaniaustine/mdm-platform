@@ -24,6 +24,8 @@ export async function announcementsView(el, ctx) {
                 modal("Delivery status", jsonBlock(await get(`/api/announcements/${a.id}/status`)));
               } catch (err) {
                 toastError(err);
+                // Row is gone (deleted by someone else, or this tab's list is stale) — refresh.
+                if (err.code === "NOT_FOUND") announcementsView(el, ctx);
               }
             } }, "Delivery status"),
             admin ? h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: async () => {
