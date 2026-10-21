@@ -167,7 +167,9 @@ export async function deviceDetailView(el, ctx, id) {
     if (!a.platforms?.length) return true;
     if (!a.platforms.includes(d.platform)) return false;
     if (d.platform === "android" && a.knoxOnlyAndroid && !d.is_knox) return false;
-    if (d.platform === "ios" && a.supervisedOnlyIos && d.is_supervised === false) return false;
+    // Supervised-only iOS commands need an explicit is_supervised=true from Zoho sync. Null/unknown blocks too
+    // because Zoho rejects every attempt otherwise ("Command not applicable for Device").
+    if (d.platform === "ios" && a.supervisedOnlyIos && d.is_supervised !== true) return false;
     return true;
   };
   const allowed = acts.filter((a) => ctx.can(a.minRole) && supports(a));
@@ -223,6 +225,12 @@ export async function deviceDetailView(el, ctx, id) {
         h("strong", {}, "Not supervised. "),
         "Apple doesn't allow lost mode, ring alarm, restart or shut down on unsupervised iPhones, so they're hidden. ",
         "Lock, location (with the Self Service app), clear passcode and wipe still work. To get full control, enrol the iPhone through Apple Business Manager."))
+      : null,
+    d.platform === "ios" && d.is_supervised === null
+      ? h("div", { class: "banner banner-warn" }, icon("shield"), h("div", {},
+        h("strong", {}, "Supervision unknown. "),
+        "Zoho hasn't told us whether this iPhone is supervised yet, so lost mode / ring alarm / restart / shut down are hidden to avoid rejected commands. ",
+        "Click ", h("strong", {}, "Sync now"), " in the top bar — that pulls per-device detail from Zoho and populates the supervision flag."))
       : null,
     h("div", { class: "split" },
       h("div", {},
