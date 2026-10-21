@@ -143,8 +143,16 @@ export function adminRoutes() {
       str(b, "fullName", { max: 120 }),
       oneOf(b, "role", ["admin", "viewer"] as const, "admin"),
     );
-    const invite = await createInviteLink(c.get("session"), admin.id, clientIp(c));
-    return c.json({ data: { id: admin.id, email: admin.email, role: admin.role, invite } }, 201);
+    // Admin row is already in place; a link-generation failure must not undo that.
+    // The owner can retry from the Team row's "Resend invite" action.
+    let invite: Awaited<ReturnType<typeof createInviteLink>> | null = null;
+    let inviteError: string | null = null;
+    try {
+      invite = await createInviteLink(c.get("session"), admin.id, clientIp(c));
+    } catch (e) {
+      inviteError = e instanceof Error ? e.message : String(e);
+    }
+    return c.json({ data: { id: admin.id, email: admin.email, role: admin.role, invite, inviteError } }, 201);
   });
   r.patch("/:id", requireRole("owner"), async (c) => {
     const b = await readJson(c.req.raw);

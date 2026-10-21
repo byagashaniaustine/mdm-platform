@@ -97,6 +97,7 @@ export async function settingsView(el, ctx, params) {
         const { data } = await post("/api/admins", { email: em.value, fullName: nm.value, role: role.value });
         reload();
         if (data?.invite) showInviteLink(data.invite);
+        else if (data?.inviteError) toast(`Admin added, but creating the invite link failed: ${data.inviteError}. Use "Resend invite" on the row to retry.`, "warn");
       } },
     ]);
   };
