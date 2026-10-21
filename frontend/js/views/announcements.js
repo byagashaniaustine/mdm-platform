@@ -10,6 +10,11 @@ export async function announcementsView(el, ctx) {
   clear(
     el,
     pageHeader("Announcements", "Messages shown on devices through the Zoho MDM app, with an optional acknowledgement button.", [newBtn]),
+    h("div", { class: "banner banner-warn" }, h("div", {},
+      h("strong", {}, "iPhone / iPad: "),
+      "Announcements only appear inside the ",
+      h("strong", {}, "ME MDM (Self Service) app"),
+      ". Zoho reports success even when the app is missing — install it from the App Store and open it once so Apple Push can register, then re-send.")),
     items.length
       ? h("div", { class: "cards" }, items.map((a) =>
         h("article", { class: "card" },
