@@ -1,4 +1,5 @@
 import { get, newIdempotencyKey, post } from "../api.js";
+import { COMMON_ANDROID_APPS, COMMON_IOS_APPS } from "../common-apps.js";
 import { confirmDestructive, DESTRUCTIVE } from "../confirm.js";
 import { ago, badge, clear, emptyState, field, fmtTime, h, icon, input, jsonBlock, loading, modal, pageHeader, select, table, toast, toastError, toastEvent } from "../ui.js";
 
@@ -231,22 +232,29 @@ export async function deviceDetailView(el, ctx, id) {
         ) : null,
         h("section", { class: "card" },
           h("div", { class: "card-head" }, h("h2", {}, "Installed apps")),
-          h("p", { class: "muted small" }, "Live from Zoho when loaded. Not stored locally."),
-          h("div", { class: "btn-row" }, h("button", { class: "btn btn-sm", type: "button", onclick: async () => {
-            clear(appsBox, loading());
-            try {
-              const apps = await get(`/api/devices/${id}/apps`);
-              clear(appsBox, apps.length
-                ? h("ul", { class: "list" }, apps.map((a) => h("li", {},
-                  h("strong", {}, a.app_name ?? "App"),
-                  h("span", { class: "muted small" }, ` · ${a.identifier ?? ""} · v${a.app_version ?? "?"}`),
-                )))
-                : h("p", { class: "muted" }, "No apps reported for this device."));
-            } catch (err) {
-              clear(appsBox);
-              toastError(err);
-            }
-          } }, "Fetch installed apps")),
+          h("p", { class: "muted small" }, "Live from Zoho. The device has to respond to a scan before new apps appear — iOS can take a minute, and unsupervised iPhones only report managed apps."),
+          h("div", { class: "btn-row" },
+            h("button", { class: "btn btn-sm", type: "button", onclick: async () => {
+              clear(appsBox, loading());
+              try {
+                const apps = await get(`/api/devices/${id}/apps`);
+                clear(appsBox, apps.length
+                  ? h("ul", { class: "list" }, apps.map((a) => h("li", {},
+                    h("strong", {}, a.app_name ?? "App"),
+                    h("span", { class: "muted small" }, ` · ${a.identifier ?? ""} · v${a.app_version ?? "?"}`),
+                  )))
+                  : h("p", { class: "muted" }, "No apps reported. Click “Request fresh scan” to ask the device to resend its inventory, then try again in ~60 seconds."));
+              } catch (err) {
+                clear(appsBox);
+                toastError(err);
+              }
+            } }, "Fetch cached list"),
+            ctx.can("admin") ? h("button", { class: "btn btn-sm", type: "button", onclick: async () => {
+              try {
+                toastEvent(await post("/api/commands", { deviceIds: [id], action: "scan" }), "Scan requested — try fetching in ~60s");
+              } catch (err) { toastError(err); }
+            } }, "Request fresh scan") : null,
+          ),
           appsBox,
         ),
         h("section", { class: "card" },
@@ -334,37 +342,60 @@ async function refreshBlacklist(id, ctx, box) {
 }
 
 async function openBlacklistModal(id, device, onDone) {
-  const listBox = h("div", {}, loading());
+  const devicePlatformCode = BLACKLIST_PLATFORM_CODE[device.platform] ?? 2;
+  const common = device.platform === "ios" ? COMMON_IOS_APPS : COMMON_ANDROID_APPS;
+  const installedBox = h("div", {}, loading());
   const picks = [];
+  const addPick = (identifier, appname, platform) => {
+    const cb = h("input", { type: "checkbox" });
+    picks.push({
+      cb,
+      read: () => ({ identifier, platform, appname }),
+      label: `${appname} · ${identifier}`,
+    });
+    return h("li", {}, h("label", { class: "pick" }, cb, h("span", {}, `${appname} · ${identifier}`)));
+  };
+
   try {
     const apps = await get(`/api/devices/${id}/apps`);
-    for (const a of apps ?? []) {
-      const cb = h("input", { type: "checkbox" });
-      picks.push({ cb, read: () => ({
-        identifier: a.identifier,
-        platform: BLACKLIST_PLATFORM_CODE[a.platform_type] ?? BLACKLIST_PLATFORM_CODE[device.platform] ?? 2,
-        appname: a.app_name ?? a.identifier,
-      }), label: `${a.app_name ?? a.identifier} · ${a.identifier ?? ""}` });
+    if (apps?.length) {
+      const rows = apps.map((a) => addPick(
+        a.identifier,
+        a.app_name ?? a.identifier,
+        BLACKLIST_PLATFORM_CODE[a.platform_type] ?? devicePlatformCode,
+      ));
+      clear(installedBox,
+        h("h4", { class: "section-head" }, "installed on this device"),
+        h("ul", { class: "list stack" }, rows),
+      );
+    } else {
+      clear(installedBox,
+        h("p", { class: "muted small" }, "No installed apps reported for this device yet. Use the Installed apps card’s “Request fresh scan” and try again, or pick from the common apps below."),
+      );
     }
-    clear(listBox, picks.length
-      ? h("ul", { class: "list stack" }, picks.map((p) => h("li", {},
-        h("label", { class: "pick" }, p.cb, h("span", {}, p.label)))))
-      : h("p", { class: "muted small" }, "No installed apps reported for this device yet. Fetch installed apps first, or add a package manually below."));
   } catch {
-    clear(listBox, h("p", { class: "muted small" }, "Could not load installed apps."));
+    clear(installedBox,
+      h("p", { class: "muted small" }, "Could not load installed apps. Pick from the common apps below, or add a package manually."),
+    );
   }
+
+  const commonRows = common.map((a) => addPick(a.identifier, a.app_name, devicePlatformCode));
+  const commonBox = h("div", {},
+    h("h4", { class: "section-head" }, "common apps"),
+    h("ul", { class: "list stack" }, commonRows),
+  );
 
   const manualName = input({ placeholder: "App name (optional)" });
   const manualPkg = input({ placeholder: "e.g. com.example.app" });
   const manualPlatform = select([{ value: "2", label: "Android" }, { value: "1", label: "iOS" }, { value: "3", label: "Windows" }]);
-  if (device.platform === "ios") manualPlatform.value = "1";
-  if (device.platform === "windows") manualPlatform.value = "3";
+  manualPlatform.value = String(devicePlatformCode);
 
   modal("Block an app on this device", h("div", { class: "stack" },
     h("p", { class: "muted small" }, "Takes effect only on this phone. If the app is already blocked by one of this device's groups, the request is rejected — remove it from the group first."),
-    listBox,
+    installedBox,
+    commonBox,
     h("div", { class: "stack" },
-      h("h4", { class: "section-head" }, "Or add a package manually"),
+      h("h4", { class: "section-head" }, "or add a package manually"),
       field("App name", manualName),
       field("Package identifier", manualPkg),
       field("Platform", manualPlatform),
@@ -377,7 +408,15 @@ async function openBlacklistModal(id, device, onDone) {
       if (pkg) {
         entries.push({ identifier: pkg, platform: Number(manualPlatform.value), appname: manualName.value.trim() || pkg });
       }
-      const valid = entries.filter((e) => /^[a-zA-Z][\w.]+$/.test(e.identifier));
+      // Dedup by identifier: same bundle in installed + common sections → one entry.
+      const seen = new Set();
+      const valid = [];
+      for (const e of entries) {
+        if (!e.identifier || seen.has(e.identifier)) continue;
+        if (!/^[a-zA-Z][\w.]+$/.test(e.identifier)) continue;
+        seen.add(e.identifier);
+        valid.push(e);
+      }
       if (!valid.length) throw Object.assign(new Error("Pick at least one app or enter a valid package identifier"), { code: "VALIDATION_FAILED" });
       toastEvent(await post(`/api/devices/${id}/blacklist`, { apps: valid }), `Blocked ${valid.length} app${valid.length === 1 ? "" : "s"}`);
       onDone?.();

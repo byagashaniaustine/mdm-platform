@@ -1,70 +1,8 @@
 import { del, get, post } from "../api.js";
+import { COMMON_ANDROID_APPS, COMMON_IOS_APPS } from "../common-apps.js";
 import { ago, badge, clear, emptyState, field, h, icon, input, loading, modal, pageHeader, responsive, select, toast, toastError, toastEvent } from "../ui.js";
 
 let catalogCache = null;
-
-// Fallback catalog for the kiosk picker when the Zoho app repo is empty AND Zoho
-// doesn't report installed apps for the device (common on unsupervised iOS).
-// Shown as the "Common apps" section — admins can tick straight from here instead
-// of typing bundle identifiers.
-const COMMON_IOS_APPS = [
-  { app_name: "Safari", identifier: "com.apple.mobilesafari" },
-  { app_name: "Chrome", identifier: "com.google.chrome.ios" },
-  { app_name: "Edge", identifier: "com.microsoft.msedge" },
-  { app_name: "Firefox", identifier: "org.mozilla.ios.Firefox" },
-  { app_name: "Camera", identifier: "com.apple.camera" },
-  { app_name: "Photos", identifier: "com.apple.mobileslideshow" },
-  { app_name: "Calculator", identifier: "com.apple.calculator" },
-  { app_name: "Calendar", identifier: "com.apple.mobilecal" },
-  { app_name: "Mail", identifier: "com.apple.mobilemail" },
-  { app_name: "Maps", identifier: "com.apple.Maps" },
-  { app_name: "App Store", identifier: "com.apple.AppStore" },
-  { app_name: "Settings", identifier: "com.apple.Preferences" },
-  { app_name: "Notes", identifier: "com.apple.mobilenotes" },
-  { app_name: "Phone", identifier: "com.apple.mobilephone" },
-  { app_name: "Messages", identifier: "com.apple.MobileSMS" },
-  { app_name: "FaceTime", identifier: "com.apple.facetime" },
-  { app_name: "Music", identifier: "com.apple.Music" },
-  { app_name: "Files", identifier: "com.apple.DocumentsApp" },
-  { app_name: "Microsoft Teams", identifier: "com.microsoft.skype.teams" },
-  { app_name: "Microsoft Outlook", identifier: "com.microsoft.Office.Outlook" },
-  { app_name: "Zoom", identifier: "us.zoom.videomeetings" },
-  { app_name: "Slack", identifier: "com.tinyspeck.chatlyio" },
-  { app_name: "Google Drive", identifier: "com.google.Drive" },
-  { app_name: "Gmail", identifier: "com.google.Gmail" },
-  { app_name: "WhatsApp", identifier: "net.whatsapp.WhatsApp" },
-  { app_name: "Shopify POS", identifier: "com.shopify.ShopifyPOS" },
-  { app_name: "Square Register", identifier: "com.squareup.square" },
-  { app_name: "ManageEngine MDM", identifier: "com.manageengine.mdm.ios" },
-];
-
-const COMMON_ANDROID_APPS = [
-  { app_name: "Chrome", identifier: "com.android.chrome" },
-  { app_name: "Edge", identifier: "com.microsoft.emmx" },
-  { app_name: "Firefox", identifier: "org.mozilla.firefox" },
-  { app_name: "Camera", identifier: "com.android.camera2" },
-  { app_name: "Photos", identifier: "com.google.android.apps.photos" },
-  { app_name: "Calculator", identifier: "com.google.android.calculator" },
-  { app_name: "Calendar", identifier: "com.google.android.calendar" },
-  { app_name: "Gmail", identifier: "com.google.android.gm" },
-  { app_name: "Maps", identifier: "com.google.android.apps.maps" },
-  { app_name: "Google Play Store", identifier: "com.android.vending" },
-  { app_name: "Settings", identifier: "com.android.settings" },
-  { app_name: "Phone", identifier: "com.google.android.dialer" },
-  { app_name: "Messages", identifier: "com.google.android.apps.messaging" },
-  { app_name: "Contacts", identifier: "com.google.android.contacts" },
-  { app_name: "Files", identifier: "com.google.android.apps.nbu.files" },
-  { app_name: "YouTube", identifier: "com.google.android.youtube" },
-  { app_name: "Google Drive", identifier: "com.google.android.apps.docs" },
-  { app_name: "Microsoft Teams", identifier: "com.microsoft.teams" },
-  { app_name: "Microsoft Outlook", identifier: "com.microsoft.office.outlook" },
-  { app_name: "Zoom", identifier: "us.zoom.videomeetings" },
-  { app_name: "Slack", identifier: "com.Slack" },
-  { app_name: "WhatsApp", identifier: "com.whatsapp" },
-  { app_name: "Shopify POS", identifier: "com.shopify.pos" },
-  { app_name: "Square Register", identifier: "com.squareup" },
-  { app_name: "ManageEngine MDM", identifier: "com.manageengine.mdm.android" },
-];
 
 export async function profilesView(el, ctx) {
   clear(el, loading());
