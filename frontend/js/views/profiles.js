@@ -51,7 +51,7 @@ export async function profilesView(el, ctx) {
 
 /** Create a profile, or add a policy to an existing one (when `existing` is passed). */
 function profileWizard(el, ctx, catalog, existing) {
-  const name = input({ maxlength: 100, placeholder: "Baseline – Security", value: existing?.name ?? "" });
+  const name = input({ maxlength: 100, required: true, placeholder: "Baseline – Security", value: existing?.name ?? "" });
   const desc = input({ maxlength: 300 });
   const platform = select([{ value: "android", label: "Android" }, { value: "ios", label: "Apple (iPhone / iPad)" }]);
   if (existing?.platform) platform.value = existing.platform;
@@ -829,10 +829,14 @@ function profileWizard(el, ctx, catalog, existing) {
       label: existing ? "Add policy" : "Create draft",
       tone: "primary",
       onClick: async () => {
+        if (!existing && !name.value.trim()) {
+          name.focus();
+          throw Object.assign(new Error("Give the profile a name (e.g. “Baseline – Security”)"), { code: "VALIDATION_FAILED" });
+        }
         const config = collect();
         const res = existing
           ? await post(`/api/profiles/${existing.id}/policies`, { purpose: purpose.value, config })
-          : await post("/api/profiles", { name: name.value, description: desc.value, platform: platform.value, purpose: purpose.value, config });
+          : await post("/api/profiles", { name: name.value.trim(), description: desc.value.trim(), platform: platform.value, purpose: purpose.value, config });
         toastEvent(res, existing ? "Policy added — re-publish to apply" : "Profile created as draft — publish it next");
         profilesView(el, ctx);
       },
