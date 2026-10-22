@@ -429,21 +429,50 @@ function profileWizard(el, ctx, catalog, existing) {
     };
 
     get("/api/apps").then((apps) => {
-      const ios = (apps ?? []).filter((a) => Number(a.platform_type) === 1);
+      const all = apps ?? [];
+      const ios = all.filter((a) => Number(a.platform_type) === 1);
+      const otherPlatformCount = all.length - ios.length;
+      const platformChip = (pt) => {
+        const n = Number(pt);
+        if (n === 1) return "iOS";
+        if (n === 2) return "Android";
+        if (n === 3) return "Windows";
+        if (n === 4) return "macOS";
+        return `platform ${pt ?? "?"}`;
+      };
+      const header = h("p", { class: "muted small" },
+        `${ios.length} iOS app${ios.length === 1 ? "" : "s"} in your Zoho repo`,
+        otherPlatformCount ? ` (${otherPlatformCount} non-iOS hidden)` : "",
+        ". To add more: open ME MDM console → Device Mgmt → App Repository → Add App.",
+      );
       if (ios.length) {
-        clear(appsBox, ...ios.map(renderRepoRow));
+        clear(appsBox, header, ...ios.map(renderRepoRow));
         return;
       }
+      // No iOS apps — show what IS there (likely only the ME MDM Self Service app)
+      // so admin can see the repo isn't broken, just lacks iOS entries.
+      const otherRows = all.length
+        ? [
+          h("p", { class: "muted small" }, "What's in the repo right now (none are iOS, so they can't be picked for iOS kiosk):"),
+          h("ul", { class: "list" }, all.map((a) =>
+            h("li", {},
+              h("strong", {}, a.app_name ?? "App"),
+              h("span", { class: "muted small" }, ` · ${platformChip(a.platform_type)} · app_id ${a.app_id}`),
+            ),
+          )),
+        ]
+        : [h("p", { class: "muted small" }, "The repo is empty.")];
       clear(appsBox,
         h("div", { class: "banner banner-warn" },
           h("div", {},
-            h("strong", {}, "iOS kiosk needs apps from the Zoho app repo. "),
-            "Zoho's applockpolicy requires a numeric app_id (not just a bundle identifier). ",
-            "Upload the kiosk app to Zoho first — ",
-            h("em", {}, "ManageEngine MDM console → Device Mgmt → App Repository → Add App → iOS"),
-            " — then reload this form and the uploaded app(s) will appear here.",
+            h("strong", {}, "No iOS apps in your Zoho app repo yet. "),
+            "iOS kiosk needs the numeric app_id Zoho assigns when an app is uploaded. ",
+            "Add the kiosk app in the ME MDM console: ",
+            h("em", {}, "Device Mgmt → App Repository → Add App → Select Apple → either Add Store App or Enterprise App"),
+            ". For a free App Store app, you just need the bundle id (e.g. com.google.chrome.ios). Once added, reload this form.",
           ),
         ),
+        ...otherRows,
       );
     }).catch((err) => {
       clear(appsBox, h("p", { class: "muted" }, "Could not load apps from Zoho."));
