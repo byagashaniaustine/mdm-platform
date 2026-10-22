@@ -269,6 +269,29 @@ const op = (s: Session, action: string, profileId: string, params: Record<string
  * Zoho shell (if we just created it) and no local row ever exists — our DB
  * stays an accurate mirror of Zoho's state.
  */
+/**
+ * iOS kiosk (`applockpolicy`) wants `app_group_id` from the per-release endpoint,
+ * NOT the `app_id` returned by `GET /apps`. The frontend picker only knows the
+ * top-level app_id, so we translate here. For each picked app:
+ *   1. GET /apps/{app_id}             → read release_labels[0].release_label_id
+ *   2. GET /apps/{app_id}/labels/{rl} → read app_group_id
+ * Then feed app_group_id to `buildIosKioskPayload` as `appId`.
+ */
+async function resolveIosKioskAppIds(eid: string, config: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const apps = (config.apps ?? []) as { appId: string | number; displayName?: string; isSystemApp?: boolean }[];
+  if (!apps.length) return config;
+  const resolved = await Promise.all(apps.map(async (a) => {
+    const detail = await zoho.getAppDetail(eid, a.appId) as { release_labels?: { release_label_id?: string | number }[] };
+    const releaseLabelId = detail.release_labels?.[0]?.release_label_id;
+    if (!releaseLabelId) fail("ZOHO_BAD_REQUEST", `App ${a.appId} has no release labels — approve it in the Zoho console first.`);
+    const labelDetail = await zoho.getAppLabelDetail(eid, a.appId, releaseLabelId) as { app_group_id?: string | number };
+    const appGroupId = labelDetail.app_group_id;
+    if (!appGroupId) fail("ZOHO_BAD_REQUEST", `Zoho did not return an app_group_id for ${a.appId}; applockpolicy requires it.`);
+    return { ...a, appId: String(appGroupId) };
+  }));
+  return { ...config, apps: resolved };
+}
+
 export async function createProfile(s: Session, input: {
   name: string;
   description: string;
@@ -276,7 +299,11 @@ export async function createProfile(s: Session, input: {
   purpose: Purpose;
   config: Record<string, unknown>;
 }, _idem: string | null) {
-  const payload = buildPayload(input.platform, input.purpose, input.config);
+  // Resolve iOS kiosk apps' app_group_id BEFORE building the payload.
+  const config = (input.platform === "ios" && input.purpose === "kiosk")
+    ? await resolveIosKioskAppIds(s.enterpriseId, input.config)
+    : input.config;
+  const payload = buildPayload(input.platform, input.purpose, config);
 
   // --- Zoho side ---
   // Reuse an existing Zoho profile with the same name if one is sitting there from
@@ -334,13 +361,16 @@ export async function createProfile(s: Session, input: {
 export async function addPolicy(s: Session, profileId: string, purpose: Purpose, config: Record<string, unknown>, idem: string | null) {
   const p = await getProfile(s.enterpriseId, profileId);
   if (p.state === "deleted") fail("CONFLICT", "Profile is deleted");
+  // Translate iOS kiosk's app_id → app_group_id before validation.
+  const resolved = (p.platform === "ios" && purpose === "kiosk")
+    ? await resolveIosKioskAppIds(s.enterpriseId, config)
+    : config;
   let payload;
   try {
-    payload = buildPayload(p.platform, purpose, config);
+    payload = buildPayload(p.platform, purpose, resolved);
   } catch (e) {
-    // Surface *what* the client sent so a VALIDATION_FAILED is debuggable from logs.
     const { log } = await import("../lib/log.ts");
-    log("warn", "profile.add_policy_validation_failed", { profile_id: profileId, purpose, config, error: String(e) });
+    log("warn", "profile.add_policy_validation_failed", { profile_id: profileId, purpose, config: resolved, error: String(e) });
     throw e;
   }
   // Zoho first — require the profile to actually exist in Zoho (created via createProfile) and

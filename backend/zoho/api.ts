@@ -125,6 +125,13 @@ export const listApps = (eid: string) => zohoPaginate<Json>(eid, "/apps", "apps"
 /** Detail for one app, including release_labels for version-pinned installs. */
 export const getAppDetail = (eid: string, appId: Id) =>
   zohoRequest<Json>(eid, { path: `/apps/${appId}` });
+/**
+ * Label-scoped app detail. This response includes `app_group_id` — the ID that
+ * `applockpolicy.allowed_apps[].app_id` actually wants (not the top-level app_id
+ * from GET /apps). Confirmed by live probe 2026-10-22.
+ */
+export const getAppLabelDetail = (eid: string, appId: Id, releaseLabelId: Id) =>
+  zohoRequest<Json>(eid, { path: `/apps/${appId}/labels/${releaseLabelId}` });
 /** Push apps to every device in the group. Each entry needs app_id + release_label_id. */
 export const installAppsOnGroup = (
   eid: string,
