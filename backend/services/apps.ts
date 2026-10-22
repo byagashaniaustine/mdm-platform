@@ -285,7 +285,13 @@ registerExecutor("group.blacklist_apps", async (ev) => {
   if (!appGroupIds.length) fail("ZOHO_BAD_REQUEST", "Could not resolve appgroupids for blacklist entries");
   // Step 2: apply to every member device of the group (Zoho's endpoint is device-scoped).
   await zoho.applyBlacklistToResources(ev.enterprise_id, deviceZids, appGroupIds);
-  return { state: "succeeded", response: { blacklisted: appGroupIds.length, devices: deviceZids.length, app_group_ids: appGroupIds } };
+  // Nudge every member device to check in now so enforcement isn't gated on
+  // their natural poll cycle. Fire-and-forget per device; count how many took.
+  const scans = await Promise.all(deviceZids.map((zid) =>
+    zoho.runDeviceAction(ev.enterprise_id, zid, "scan").then(() => true).catch(() => false)
+  ));
+  const scansTriggered = scans.filter(Boolean).length;
+  return { state: "succeeded", response: { blacklisted: appGroupIds.length, devices: deviceZids.length, app_group_ids: appGroupIds, scans_triggered: scansTriggered } };
 });
 
 registerExecutor("group.remove_blacklist", async (ev) => {
@@ -494,7 +500,11 @@ registerExecutor("command.blacklist_apps", async (ev) => {
   const appGroupIds = entries.map((e) => byIdentifier.get(e.identifier)).filter((x): x is string => !!x);
   if (!appGroupIds.length) fail("ZOHO_BAD_REQUEST", "Could not resolve appgroupids for blacklist entries");
   await zoho.applyBlacklistToResources(ev.enterprise_id, [device.zoho_device_id], appGroupIds);
-  return { state: "succeeded", response: { blacklisted: appGroupIds.length, app_group_ids: appGroupIds } };
+  // Nudge the device to check in now instead of waiting for its natural poll
+  // (which can be hours). Fire-and-forget: a failed scan shouldn't fail the
+  // block itself, but note it in the response so admins can see we tried.
+  const scanTriggered = await zoho.runDeviceAction(ev.enterprise_id, device.zoho_device_id, "scan").then(() => true).catch(() => false);
+  return { state: "succeeded", response: { blacklisted: appGroupIds.length, app_group_ids: appGroupIds, scan_triggered: scanTriggered } };
 });
 
 registerExecutor("command.remove_blacklist", async (ev) => {

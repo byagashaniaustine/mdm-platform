@@ -332,7 +332,17 @@ async function refreshBlacklist(id, ctx, box) {
         // events journal yet never actually enforce on the phone (common on
         // supervised iOS when the device hasn't checked in, or when Apple
         // rejected the restriction).
-        a.enforcement ? badge(a.enforcement.label, a.enforcement.tone) : null,
+        a.enforcement
+          ? h("span", {
+              title: a.enforcement.label === "enforced"
+                ? "Zoho confirms the block is applied to this device. On iOS, Apple hides App Store app icons only if the device is supervised and the restriction took effect — confirm visually on the phone."
+                : a.enforcement.label === "pending"
+                ? "Zoho has the block queued but the device hasn't checked in yet. We auto-trigger a scan on block; if this stays pending for 10+ minutes the device isn't reachable."
+                : a.enforcement.label === "failed"
+                ? "Zoho reports the restriction was rejected by the device. Check the device's enrolment status and whether it's still supervised."
+                : a.enforcement.label,
+            }, badge(a.enforcement.label, a.enforcement.tone))
+          : null,
         ctx.can("admin")
           ? h("button", { class: "btn btn-xs btn-ghost", type: "button", style: "margin-left: auto", onclick: async () => {
             try {
