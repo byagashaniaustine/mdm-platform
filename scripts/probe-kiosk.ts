@@ -8,7 +8,7 @@
 //
 // For iOS: creates applockpolicy with a Zoho-registered app_id from the repo.
 // Skips iOS if the only app in the repo is ME MDM Self Service (which Zoho forbids).
-import { addPayload, createProfile, deleteProfiles, listApps } from "../backend/zoho/api.ts";
+import { addPayload, createProfile, deleteProfiles, getAppDetail, getAppLabelDetail, listApps } from "../backend/zoho/api.ts";
 import { toAppError } from "../backend/lib/errors.ts";
 
 const [eid] = Deno.args;
@@ -99,7 +99,17 @@ if (!kioskable) {
   console.log("    Skipping iOS kiosk probe.");
   results.push({ platform: "iOS · applockpolicy", shape: "guide shape", ok: false, message: "no non-MDM iOS app in Zoho repo" });
 } else {
-  const allowedApps = `[{"app_id":${kioskable.app_id},"group_display_name":${JSON.stringify(kioskable.app_name ?? "probe")}}]`;
+  // applockpolicy wants app_group_id (from label-level endpoint), NOT the top-level app_id.
+  // See 32c5794 and [[zoho-guide-vs-reality-field-gaps]].
+  console.log(`Resolving app_group_id for ${kioskable.app_name ?? kioskable.app_id}…`);
+  const detail = await getAppDetail(eid, kioskable.app_id) as { release_labels?: { release_label_id?: string | number }[] };
+  const rl = detail.release_labels?.[0]?.release_label_id;
+  if (!rl) { console.warn("No release_labels. Skipping iOS kiosk probe."); Deno.exit(1); }
+  const labelDetail = await getAppLabelDetail(eid, kioskable.app_id, rl) as { app_group_id?: string | number };
+  const appGroupId = labelDetail.app_group_id;
+  if (!appGroupId) { console.warn("No app_group_id. Skipping iOS kiosk probe."); Deno.exit(1); }
+  console.log(`  app_id=${kioskable.app_id}  →  app_group_id=${appGroupId}`);
+  const allowedApps = `[{"app_id":${appGroupId},"group_display_name":${JSON.stringify(kioskable.app_name ?? "probe")}}]`;
   await tryPayload(1, "applockpolicy", {
     kiosk_mode: 1,
     allowed_apps: allowedApps,
