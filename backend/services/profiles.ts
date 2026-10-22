@@ -490,17 +490,38 @@ registerExecutor("profile.delete", async (ev) => {
   const p = await getProfile(ev.enterprise_id, ev.profile_id!);
   let zohoDeleted = false;
   if (p.zoho_profile_id) {
-    // Take it off its groups first so devices stop receiving it cleanly.
-    const links = await run<{ groups: { zoho_group_id: string | null } | { zoho_group_id: string | null }[] | null }[]>(
-      db().from("profile_groups").select("groups(zoho_group_id)").eq("profile_id", p.id),
-    );
-    for (const l of links) {
-      for (const g of Array.isArray(l.groups) ? l.groups : l.groups ? [l.groups] : []) {
-        if (g.zoho_group_id) await zoho.disassociateProfilesFromGroup(ev.enterprise_id, g.zoho_group_id, [p.zoho_profile_id]).catch(() => {});
+    // Disassociate from EVERY Zoho group that still has this profile — not just
+    // the ones our local DB knows about. Our profile_groups mirror can be
+    // stale (sync lag, or a profile pushed outside the group model) and if we
+    // only disassociate from DB-known groups, devices keep showing the profile
+    // because Zoho never pushes a RemoveProfile command for the ones we missed.
+    // Scanning all groups costs N listGroupProfiles calls but makes delete
+    // actually take effect on the device.
+    const zpid = String(p.zoho_profile_id);
+    try {
+      const groups = (await zoho.listGroups(ev.enterprise_id)) as { group_id?: string | number }[];
+      for (const g of groups) {
+        if (!g.group_id) continue;
+        const zgid = String(g.group_id);
+        try {
+          const resp = await zoho.listGroupProfiles(ev.enterprise_id, zgid);
+          const list = Array.isArray(resp) ? resp : (resp as { profiles?: { profile_id?: string | number }[] } | null)?.profiles ?? [];
+          const hasIt = list.some((x) => String((x as { profile_id?: string | number }).profile_id ?? "") === zpid);
+          if (hasIt) {
+            await zoho.disassociateProfilesFromGroup(ev.enterprise_id, zgid, [zpid]).catch(() => {});
+          }
+        } catch {
+          // listGroupProfiles isn't documented; some tenants return 404/400.
+          // Best-effort: fall through to deleteProfiles. iOS still removes the
+          // profile when it detects the parent profile is gone on next check-in.
+        }
       }
+    } catch (e) {
+      const { log } = await import("../lib/log.ts");
+      log("warn", "profile.delete_group_sweep_failed", { enterprise_id: ev.enterprise_id, profile_id: p.id, error: String(e) });
     }
     try {
-      await zoho.deleteProfiles(ev.enterprise_id, [p.zoho_profile_id]);
+      await zoho.deleteProfiles(ev.enterprise_id, [zpid]);
       zohoDeleted = true;
     } catch (e) {
       const err = toAppError(e);
