@@ -398,8 +398,22 @@ async function openBlacklistModal(id, device, onDone) {
   const manualPlatform = select([{ value: "2", label: "Android" }, { value: "1", label: "iOS" }, { value: "3", label: "Windows" }]);
   manualPlatform.value = String(devicePlatformCode);
 
+  // iOS: Apple only enforces app blocking on *supervised* devices. On unsupervised
+  // iPhones Zoho still returns 200 (hence the green toast) but iOS drops the
+  // enforcement — at best Zoho's Self Service app notifies the user. Android has
+  // a similar split: Samsung Knox / work-profile / fully-managed phones actually
+  // remove the app; other Androids only notify.
+  const supervisionWarning = device.platform === "ios" && device.is_supervised !== true
+    ? h("p", { class: "warn-banner small" },
+        h("strong", {}, device.is_supervised === false ? "Not supervised. " : "Supervision status unknown. "),
+        "Apple ignores app-block MDM commands on unsupervised iPhones — Zoho will return success but the app keeps running. ",
+        "Enrol the phone through Apple Business Manager to supervise it.",
+      )
+    : null;
+
   modal("Block an app on this device", h("div", { class: "stack" },
-    h("p", { class: "muted small" }, "Takes effect only on this phone. If the app is already blocked by one of this device's groups, the request is rejected — remove it from the group first."),
+    h("p", { class: "muted small" }, "Takes effect only on this phone. If the app is already blocked by one of this device's groups, the request is rejected — remove it from the group first. iPhone: supervised phones hide the app; unsupervised ones only notify the user. Android: removed on Samsung / work-profile / fully-managed phones; others only notify the user."),
+    supervisionWarning,
     installedBox,
     commonBox,
     h("div", { class: "stack" },
