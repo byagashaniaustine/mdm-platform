@@ -38,23 +38,53 @@ export async function createAnnouncement(s: Session, input: {
   needsAck: boolean;
   ackButton: string;
   titleColor: string;
-}, idem: string | null) {
+}, _idem: string | null) {
   if (!/^#[0-9a-fA-F]{6}$/.test(input.titleColor)) fail("VALIDATION_FAILED", "titleColor must look like #1F3A5F");
+  const titleColor = input.titleColor;
+  const ackButton = input.ackButton || "Got it";
+  const nbarMessage = input.title;
+
+  // Zoho-first: find an existing same-name announcement, or create one. Zoho's
+  // POST /announcements returns 204 No Content, so we have to look up the id by
+  // name after creation — same pattern the executor was using.
+  const findByName = async () =>
+    (await zoho.listAnnouncements(s.enterpriseId))
+      .filter((x) => x.announcement_name === input.name)
+      .sort((x, y) => Number(y.creation_time ?? 0) - Number(x.creation_time ?? 0))[0];
+
+  let found = await findByName();
+  if (!found) {
+    await zoho.createAnnouncement(s.enterpriseId, {
+      name: input.name,
+      format: 1,
+      title: input.title,
+      detailMessage: toSafeHtml(input.message),
+      nbarMessage,
+      titleColor,
+      needsAck: input.needsAck,
+      ackButton,
+    });
+    found = await findByName();
+  }
+  if (!found?.announcement_id) fail("ZOHO_UNAVAILABLE", "Announcement created in Zoho but not visible yet — try again in a moment.");
+  const zid = String(found.announcement_id);
+
   const row = await run<{ id: string }>(
     db().from("announcements").insert({
       enterprise_id: s.enterpriseId,
       name: input.name,
       title: input.title,
-      detail_message: input.message, // stored as plain text, escaped when sent
-      nbar_message: input.title,
+      detail_message: input.message,
+      nbar_message: nbarMessage,
       needs_ack: input.needsAck,
-      ack_button: input.ackButton || "Got it",
-      title_color: input.titleColor,
+      ack_button: ackButton,
+      title_color: titleColor,
+      zoho_announcement_id: zid,
+      last_synced_at: new Date().toISOString(),
       created_by: s.adminId,
     }).select("id").single(),
   );
-  const { event } = await op(s, "announcement.create", row.id, {}, idem);
-  return { announcementId: row.id, event };
+  return { announcementId: row.id, event: null };
 }
 
 export async function sendAnnouncement(s: Session, id: string, groupIds: string[], deviceIds: string[], idem: string | null) {

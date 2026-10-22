@@ -20,7 +20,7 @@ export function announcementRoutes() {
 
   r.post("/", requireRole("admin"), async (c) => {
     const b = await readJson(c.req.raw);
-    const { announcementId, event } = await createAnnouncement(c.get("session"), {
+    const { announcementId } = await createAnnouncement(c.get("session"), {
       name: str(b, "name", { max: 100 }),
       title: str(b, "title", { max: 120 }),
       message: str(b, "message", { max: 4000 }),
@@ -28,7 +28,8 @@ export function announcementRoutes() {
       ackButton: str(b, "ackButton", { required: false, max: 30 }),
       titleColor: str(b, "titleColor", { required: false, max: 7 }) || "#1F3A5F",
     }, idempotencyKey(c));
-    return eventResponse(c, event, { announcementId });
+    // Zoho-first create: announcement exists in Zoho and locally by the time we return.
+    return c.json({ data: { announcementId, events: [] } });
   });
 
   r.post("/:id/send", requireRole("admin"), async (c) => {

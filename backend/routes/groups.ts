@@ -25,12 +25,13 @@ export function groupRoutes() {
 
   r.post("/", requireRole("admin"), async (c) => {
     const b = await readJson(c.req.raw);
-    const { groupId, event } = await createGroup(c.get("session"), {
+    const { groupId } = await createGroup(c.get("session"), {
       name: str(b, "name", { max: 100 }),
       kind: oneOf(b, "kind", ["department", "function", "baseline", "other"] as const, "department"),
       description: str(b, "description", { required: false, max: 300 }),
     }, idempotencyKey(c));
-    return eventResponse(c, event, { groupId });
+    // Zoho-first create: group exists in Zoho and locally by the time we return.
+    return c.json({ data: { groupId, events: [] } });
   });
 
   r.delete("/:id", requireRole("owner"), async (c) => {

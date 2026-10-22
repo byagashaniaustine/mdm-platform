@@ -42,7 +42,18 @@ const op = (s: Session, action: string, groupId: string, params: Record<string, 
     idempotencyKey: idem,
   }).then((r) => ({ ...r, event: raiseIfFailed(r.event) }));
 
-export async function createGroup(s: Session, input: { name: string; kind: GroupKind; description: string }, idem: string | null) {
+export async function createGroup(s: Session, input: { name: string; kind: GroupKind; description: string }, _idem: string | null) {
+  // Zoho-first: create (or adopt an existing same-named) group in Zoho before any local write.
+  const existing = (await zoho.listGroups(s.enterpriseId)).find((x) => x.name === input.name);
+  let zohoGroupId: string | number;
+  if (existing?.group_id !== undefined && existing.group_id !== null) {
+    zohoGroupId = existing.group_id as string | number;
+  } else {
+    const created = await zoho.createGroup(s.enterpriseId, input.name, input.description ?? "");
+    const rawZid = (created as { group_id?: number | string }).group_id;
+    if (!rawZid) fail("ZOHO_BAD_REQUEST", "Zoho did not return a group_id");
+    zohoGroupId = rawZid;
+  }
   const group = await run<{ id: string }>(
     db().from("groups").insert({
       enterprise_id: s.enterpriseId,
@@ -50,10 +61,11 @@ export async function createGroup(s: Session, input: { name: string; kind: Group
       kind: input.kind,
       description: input.description || null,
       group_type: 6,
+      zoho_group_id: String(zohoGroupId),
+      last_synced_at: new Date().toISOString(),
     }).select("id").single(),
   );
-  const { event } = await op(s, "group.create", group.id, {}, idem);
-  return { groupId: group.id, event };
+  return { groupId: group.id, event: null };
 }
 
 export async function addDevicesToGroup(s: Session, groupId: string, deviceIds: string[], idem: string | null) {

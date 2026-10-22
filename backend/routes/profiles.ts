@@ -32,26 +32,28 @@ export function profileRoutes() {
 
   r.post("/", requireRole("admin"), async (c) => {
     const b = await readJson(c.req.raw);
-    const { profileId, event } = await createProfile(c.get("session"), {
+    const { profileId } = await createProfile(c.get("session"), {
       name: str(b, "name", { max: 100 }),
       description: str(b, "description", { required: false, max: 300 }),
       platform: oneOf(b, "platform", ["android", "ios"] as const, "android"),
       purpose: oneOf(b, "purpose", PURPOSES),
       config: obj(b, "config", true),
     }, idempotencyKey(c));
-    return eventResponse(c, event, { profileId });
+    // Zoho-first create: profile exists in Zoho and locally once we get here, so
+    // return 200 with no events to poll (nothing was queued).
+    return c.json({ data: { profileId, events: [] } });
   });
 
   r.post("/:id/policies", requireRole("admin"), async (c) => {
     const b = await readJson(c.req.raw);
-    const { event } = await addPolicy(
+    const { profileId } = await addPolicy(
       c.get("session"),
       uuidParam(c.req.param("id")),
       oneOf(b, "purpose", PURPOSES),
       obj(b, "config", true),
       idempotencyKey(c),
     );
-    return eventResponse(c, event);
+    return c.json({ data: { profileId, events: [] } });
   });
 
   r.post("/:id/publish", requireRole("admin"), async (c) => {

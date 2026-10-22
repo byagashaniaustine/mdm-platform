@@ -262,14 +262,56 @@ const op = (s: Session, action: string, profileId: string, params: Record<string
   submitOperation({ enterpriseId: s.enterpriseId, adminId: s.adminId, category: "profile", action, profileId, params, idempotencyKey: idem })
     .then((r) => ({ ...r, event: raiseIfFailed(r.event) }));
 
+/**
+ * Create a profile. Zoho-first invariant: we call Zoho to create the shell and
+ * add the payload BEFORE touching our DB. The `profiles` row only gets inserted
+ * once Zoho has confirmed everything. If Zoho rejects anything, we clean up the
+ * Zoho shell (if we just created it) and no local row ever exists — our DB
+ * stays an accurate mirror of Zoho's state.
+ */
 export async function createProfile(s: Session, input: {
   name: string;
   description: string;
   platform: "android" | "ios";
   purpose: Purpose;
   config: Record<string, unknown>;
-}, idem: string | null) {
+}, _idem: string | null) {
   const payload = buildPayload(input.platform, input.purpose, input.config);
+
+  // --- Zoho side ---
+  // Reuse an existing Zoho profile with the same name if one is sitting there from
+  // a prior failed attempt — avoids 409 Resource Already Exists.
+  const existing = (await zoho.listProfiles(s.enterpriseId)).find((x) => x.profile_name === input.name);
+  let zid: string;
+  let shellJustCreated = false;
+  if (existing?.profile_id) {
+    zid = String(existing.profile_id);
+  } else {
+    const created = await zoho.createProfile(s.enterpriseId, {
+      name: input.name,
+      description: input.description ?? "",
+      platformType: input.platform === "ios" ? 1 : 2,
+      scope: 0,
+    });
+    const rawZid = (created as { profile_id?: string | number }).profile_id;
+    if (!rawZid) fail("ZOHO_BAD_REQUEST", "Zoho did not return a profile_id");
+    zid = String(rawZid);
+    shellJustCreated = true;
+  }
+
+  try {
+    await zoho.addPayload(s.enterpriseId, zid, payload.name, payload.body);
+  } catch (err) {
+    // Payload rejected. If we just created the Zoho shell for this call, delete
+    // it so Zoho doesn't accumulate empty shells. If we adopted an existing
+    // shell, leave it alone — it was there before us.
+    if (shellJustCreated) {
+      await zoho.deleteProfiles(s.enterpriseId, [zid]).catch(() => {});
+    }
+    throw err;
+  }
+
+  // --- DB side (mirror Zoho's confirmed state) ---
   const row = await run<{ id: string }>(
     db().from("profiles").insert({
       enterprise_id: s.enterpriseId,
@@ -280,30 +322,12 @@ export async function createProfile(s: Session, input: {
       state: "draft",
       payload_names: [payload.name],
       payload_config: { [payload.name]: payload.body },
+      zoho_profile_id: zid,
       created_by: s.adminId,
+      last_synced_at: new Date().toISOString(),
     }).select("id").single(),
   );
-  try {
-    const { event } = await op(s, "profile.create", row.id, {}, idem);
-    return { profileId: row.id, event };
-  } catch (err) {
-    // Zoho rejected it (payload type unknown, bad field, etc.). Don't leave a
-    // half-baked draft and an orphaned Zoho shell behind: soft-delete the local
-    // row and best-effort delete the Zoho shell if ensureZohoProfile managed
-    // to create one before the payload-add failed.
-    const after = await run<{ zoho_profile_id: string | null }>(
-      db().from("profiles").select("zoho_profile_id").eq("id", row.id).single(),
-    );
-    await run(db().from("profiles").update({ state: "deleted" }).eq("id", row.id));
-    if (after.zoho_profile_id) {
-      await zoho.deleteProfiles(s.enterpriseId, [after.zoho_profile_id]).catch(() => {
-        // Can't delete from Zoho (not in trash yet / other error). Not fatal —
-        // the local row is already hidden, and the shell can be cleaned from
-        // the Zoho console manually.
-      });
-    }
-    throw err;
-  }
+  return { profileId: row.id, event: null as unknown };
 }
 
 /** Add another policy to an existing profile (e.g. passcode + restrictions together). */
@@ -319,14 +343,19 @@ export async function addPolicy(s: Session, profileId: string, purpose: Purpose,
     log("warn", "profile.add_policy_validation_failed", { profile_id: profileId, purpose, config, error: String(e) });
     throw e;
   }
+  // Zoho first — require the profile to actually exist in Zoho (created via createProfile) and
+  // make the payload-add stick there before mirroring to our DB.
+  const zid = requireZohoId(p.zoho_profile_id, `Profile "${p.name}"`);
+  await zoho.addPayload(s.enterpriseId, zid, payload.name, payload.body);
   await run(
     db().from("profiles").update({
       payload_names: [...new Set([...p.payload_names, payload.name])],
       payload_config: { ...p.payload_config, [payload.name]: payload.body },
       state: p.state === "published" ? "modified" : p.state,
+      last_synced_at: new Date().toISOString(),
     }).eq("id", p.id),
   );
-  return await op(s, "profile.add_payload", p.id, { payload_name: payload.name }, idem);
+  return { profileId: p.id, event: null };
 }
 
 export const publishProfile = (s: Session, profileId: string, idem: string | null) =>
