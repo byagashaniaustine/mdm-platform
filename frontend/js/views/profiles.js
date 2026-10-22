@@ -415,6 +415,21 @@ function profileWizard(el, ctx, catalog, existing) {
     mode.addEventListener("change", refreshHint);
     refreshHint();
 
+    // Single mode = pick exactly one; ticking a second unchecks the first (radio-like).
+    const enforceSingle = (justChecked) => {
+      if (mode.value !== "single") return;
+      for (const p of picks) if (p.cb !== justChecked && p.cb.checked) p.cb.checked = false;
+    };
+    mode.addEventListener("change", () => {
+      if (mode.value !== "single") return;
+      let keptOne = false;
+      for (const p of picks) {
+        if (!p.cb.checked) continue;
+        if (keptOne) p.cb.checked = false;
+        else keptOne = true;
+      }
+    });
+
     // iOS kiosk requires Zoho's numeric app_id — NOT a bundle identifier — per the
     // applockpolicy spec. So only apps uploaded to the Zoho app repo work; the
     // common-apps catalog, enrolled-devices scan and manual-bundle add used

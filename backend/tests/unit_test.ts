@@ -286,7 +286,9 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     assert.ok(sJson.includes("9007199254741861"), "exact app_id digits must be preserved");
     const sApps = JSON.parse(sJson);
     assert.equal(sApps[0].group_display_name, "POS");
-    assert.equal(sApps[0].is_system_app, false);
+    // is_system_app intentionally omitted — Zoho's live API rejects it even though
+    // the guide field table lists it as required.
+    assert.ok(!("is_system_app" in sApps[0]));
     // Multi mode also writes allowed_apps per the guide samples.
     const multi = buildIosKioskPayload({ mode: "multi", apps: [{ appId: "111", displayName: "A" }, { appId: "222" }] });
     assert.equal(multi.kiosk_mode, 2);

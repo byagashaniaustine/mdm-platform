@@ -581,12 +581,15 @@ export function buildIosKioskPayload(input: {
   // JavaScript's safe-integer boundary (2^53 = 9007199254740992). Routing them through
   // Number() loses the last digit — Zoho then can't find the app. Preserving the exact
   // digit string here avoids that.
-  const esc = (s: string) => JSON.stringify(s); // handles quoting/escaping of the display name
+  //
+  // The dev guide lists `is_system_app` as a required field, but Zoho's live API rejects
+  // it with "Invalid parameter is_system_app detected" — same guide-vs-reality gap as
+  // allow_youtube / action_name. Omit it; Zoho infers system vs user from the app_id.
+  const esc = (s: string) => JSON.stringify(s);
   const parts = input.apps.map((a) => {
     const idDigits = String(a.appId);
     const name = esc(a.displayName ?? idDigits);
-    const isSys = a.isSystemApp ?? false;
-    return `{"app_id":${idDigits},"is_system_app":${isSys},"group_display_name":${name}}`;
+    return `{"app_id":${idDigits},"group_display_name":${name}}`;
   });
   const appsJson = `[${parts.join(",")}]`;
   // Guide: kiosk_mode is 1 (single) or 2 (multi). Both guide SAMPLES use `allowed_apps`

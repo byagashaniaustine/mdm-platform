@@ -68,7 +68,9 @@ const displayName = displayNameArg || `probe-${appId}`;
 // Build allowed_apps as a JSON STRING (as per the guide samples).
 // Keep the app_id digits exact — don't JSON.stringify a Number, since the id
 // may exceed 2^53.
-const allowedApps = `[{"app_id":${appId},"is_system_app":false,"group_display_name":${JSON.stringify(displayName)}}]`;
+// Guide field table lists is_system_app as required, but Zoho's live API rejects
+// it ("Invalid parameter is_system_app detected"). Omit it — guide-vs-reality gap.
+const allowedApps = `[{"app_id":${appId},"group_display_name":${JSON.stringify(displayName)}}]`;
 const body = {
   kiosk_mode: 1,
   allowed_apps: allowedApps,
