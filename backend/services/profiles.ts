@@ -14,6 +14,7 @@ import {
   buildPasscodePayload,
   buildIosEmailPayload,
   buildIosKioskPayload,
+  buildIosLockscreenMessagePayload,
   buildIosPasscodePayload,
   buildIosProxyPayload,
   buildIosVpnPayload,
@@ -50,6 +51,7 @@ export function profileCatalog() {
       { id: "kiosk", label: "Kiosk mode", platforms: ["android", "ios"] },
       { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android", "ios"] },
       { id: "frp", label: "Factory Reset Protection accounts", platforms: ["android"] },
+      { id: "lockscreen_message", label: "Lock-screen message (iOS supervised)", platforms: ["ios"] },
       // iOS Wi-Fi, Web content filter, VPN, Email, Proxy are temporarily hidden from
       // the UI: the builders I wrote had wrong Zoho field names (singleappmodepolicy,
       // bundle_identifier, EmailType*, filter_type strings, etc.) and the guide shows
@@ -65,7 +67,7 @@ export function profileCatalog() {
 
 /** Turn the dashboard form into { payloadName: body }. */
 export function buildPayload(platform: "android" | "ios", purpose: Purpose, config: Record<string, unknown>) {
-  const IOS_ALLOWED = ["restrictions", "passcode", "kiosk", "wifi", "webfilter", "vpn", "email", "proxy", "custom"];
+  const IOS_ALLOWED = ["restrictions", "passcode", "kiosk", "wifi", "webfilter", "vpn", "email", "proxy", "lockscreen_message", "custom"];
   if (platform === "ios" && !IOS_ALLOWED.includes(purpose)) {
     fail("VALIDATION_FAILED", `For Apple devices choose one of: ${IOS_ALLOWED.join(", ")}`);
   }
@@ -171,6 +173,16 @@ export function buildPayload(platform: "android" | "ios", purpose: Purpose, conf
         password: config.password as string | undefined,
         pacUrl: config.pacUrl as string | undefined,
         allowBypass: config.allowBypass as boolean | undefined,
+      }),
+    };
+  }
+  if (platform === "ios" && purpose === "lockscreen_message") {
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildIosLockscreenMessagePayload({
+        bgColour: String(config.bgColour ?? "#1F3A5F"),
+        orientation: config.orientation as 1 | 2 | undefined,
+        messages: (config.messages ?? []) as { message: string; textColour: string }[],
       }),
     };
   }

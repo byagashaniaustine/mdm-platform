@@ -24,6 +24,7 @@ export const PAYLOAD = {
     vpn: "vpnpolicy",
     email: "emailpolicy",
     proxy: "globalhttpproxypolicy",
+    lockscreen_message: "ioslockscreenmessage",
   },
 } as const;
 
@@ -37,6 +38,7 @@ export type Purpose =
   | "vpn"
   | "email"
   | "proxy"
+  | "lockscreen_message"
   | "custom"
   | "apps"
   | "app_blacklist";
@@ -811,6 +813,36 @@ export function buildIosProxyPayload(input: {
     proxy_type: "auto",
     proxy_pac_url: input.pacUrl.trim(),
     allow_bypass: input.allowBypass ?? true,
+  };
+}
+
+// ----------------------------------------- iOS lock-screen message (supervised)
+/**
+ * iOS lock-screen message (`ioslockscreenmessage`). Shows a persistent message
+ * on the lock screen with a configurable background. Pair with `applockpolicy`
+ * to kiosk-lock a device AND show a help / contact / status message that stays
+ * visible even when the user hits the sleep button.
+ *
+ * Verbatim from MDM_Dev_Guide.pdf line 15442 (IOS_LOCKSCREEN_MESSAGE).
+ */
+const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/;
+export function buildIosLockscreenMessagePayload(input: {
+  bgColour: string;             // "#1F3A5F" — required when wallpaper_type=1
+  orientation?: 1 | 2;          // 1 portrait, 2 landscape (default 1)
+  messages: { message: string; textColour: string }[];
+}) {
+  if (!HEX_COLOUR.test(input.bgColour)) fail("VALIDATION_FAILED", "bgColour must look like #1F3A5F");
+  if (!input.messages.length) fail("VALIDATION_FAILED", "Add at least one message line");
+  for (const m of input.messages) {
+    if (!m.message?.trim()) fail("VALIDATION_FAILED", "Each message needs non-empty text");
+    if (!HEX_COLOUR.test(m.textColour)) fail("VALIDATION_FAILED", `textColour '${m.textColour}' must look like #FFFFFF`);
+    if (m.message.length > 500) fail("VALIDATION_FAILED", "Message is too long (max 500 chars)");
+  }
+  return {
+    wallpaper_type: 1,    // 1 = custom bg colour (we don't do file upload)
+    bg_colour: input.bgColour,
+    orientation: input.orientation ?? 1,
+    messages: input.messages.map((m) => ({ message: m.message, text_colour: m.textColour })),
   };
 }
 

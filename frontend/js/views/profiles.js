@@ -95,6 +95,8 @@ function profileWizard(el, ctx, catalog, existing) {
       renderIosEmail();
     } else if (kind === "proxy" && plat() === "ios") {
       renderIosProxy();
+    } else if (kind === "lockscreen_message" && plat() === "ios") {
+      renderIosLockscreenMessage();
     } else if (kind === "restrictions") {
       const restrictionList = plat() === "ios" ? catalog.ios.restrictions : catalog.restrictions;
       // Per restriction kind: binary / enum use <select>, integer uses <input type=number>,
@@ -788,6 +790,42 @@ function profileWizard(el, ctx, catalog, existing) {
       pacUrl: pac.value.trim(),
       allowBypass: bypass.checked,
     });
+  }
+
+  function renderIosLockscreenMessage() {
+    const msg = h("textarea", { rows: 3, maxlength: 500, placeholder: "e.g. This device belongs to Acme POS. For help call +255 712 345 678." });
+    const bg = input({ type: "color", value: "#1F3A5F" });
+    const fg = input({ type: "color", value: "#FFFFFF" });
+    const orientation = select([{ value: "1", label: "Portrait" }, { value: "2", label: "Landscape" }]);
+    // Live preview so admins see the result immediately.
+    const preview = h("div", {
+      class: "lockscreen-preview",
+      style: "border-radius:16px; padding:36px 24px; min-height:120px; font-weight:500; text-align:center; display:flex; align-items:center; justify-content:center; white-space:pre-wrap; background:#1F3A5F; color:#FFFFFF;",
+    }, "This device belongs to Acme POS. For help call +255 712 345 678.");
+    const refresh = () => {
+      preview.style.background = bg.value;
+      preview.style.color = fg.value;
+      preview.textContent = msg.value.trim() || "Your message will show here on the lock screen.";
+    };
+    for (const el of [msg, bg, fg]) el.addEventListener("input", refresh);
+    clear(formBox,
+      h("p", { class: "muted small" }, "iOS supervised-only. Shows a persistent message on the device lock screen. Pair with iOS Kiosk mode to lock the device to one app AND display help info."),
+      field("Message", msg, "Up to 500 characters. Keep it short so it stays legible."),
+      field("Background colour", bg),
+      field("Text colour", fg),
+      field("Orientation", orientation),
+      h("h4", { class: "section-head" }, "preview"),
+      preview,
+    );
+    collect = () => {
+      const text = msg.value.trim();
+      if (!text) throw Object.assign(new Error("Write a lock-screen message first"), { code: "VALIDATION_FAILED" });
+      return {
+        bgColour: bg.value,
+        orientation: Number(orientation.value),
+        messages: [{ message: text, textColour: fg.value }],
+      };
+    };
   }
 
   function renderIosPasscode() {
