@@ -292,15 +292,21 @@ registerExecutor("group.remove_blacklist", async (ev) => {
   await zohoGroupId(ev.enterprise_id, ev.group_id!);
   const deviceZids = await groupMemberZohoIds(ev.enterprise_id, ev.group_id!);
   const appGroupIds = (ev.params.app_group_ids as string[]).map(String);
-  if (!deviceZids.length) return { state: "succeeded", response: { unblocked: 0, note: "Group has no enrolled devices" } };
+  // app_group_ids is on every branch so groupBlockedAppGroupIdsForGroup's
+  // running tally subtracts correctly — a missing field would make the UI
+  // list those apps as still-blocked forever.
+  if (!deviceZids.length) {
+    return { state: "succeeded", response: { unblocked: 0, app_group_ids: appGroupIds, note: "Group has no enrolled devices" } };
+  }
   try {
     await zoho.removeBlacklistFromResources(ev.enterprise_id, deviceZids, appGroupIds);
   } catch (e) {
     // Zoho returns 404 when the appgroupid wasn't actually applied to these devices.
+    // Still subtract from the tally — "not there" means the local view was stale.
     if ((e as { code?: string }).code !== "ZOHO_NOT_FOUND") throw e;
-    return { state: "succeeded", response: { unblocked: 0, note: "Was not applied to this group's devices" } };
+    return { state: "succeeded", response: { unblocked: 0, app_group_ids: appGroupIds, note: "Was not applied to this group's devices" } };
   }
-  return { state: "succeeded", response: { unblocked: appGroupIds.length, devices: deviceZids.length } };
+  return { state: "succeeded", response: { unblocked: appGroupIds.length, devices: deviceZids.length, app_group_ids: appGroupIds } };
 });
 
 /**
