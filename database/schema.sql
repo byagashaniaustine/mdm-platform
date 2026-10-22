@@ -28,7 +28,7 @@ create type platform_type    as enum ('android', 'ios', 'windows', 'chrome', 'ma
 create type admin_role       as enum ('owner', 'admin', 'viewer');
 create type group_kind       as enum ('department', 'function', 'baseline', 'other');
 create type profile_state    as enum ('draft', 'published', 'modified', 'deleted');
-create type profile_purpose  as enum ('restrictions', 'kiosk', 'passcode', 'frp', 'wifi', 'custom');
+create type profile_purpose  as enum ('restrictions', 'kiosk', 'passcode', 'frp', 'wifi', 'webfilter', 'vpn', 'email', 'proxy', 'lockscreen_message', 'custom');
 create type zoho_conn_status as enum ('pending', 'connected', 'error', 'revoked');
 create type event_state      as enum (
   'awaiting_confirmation',  -- destructive command waiting for step-2 confirmation
