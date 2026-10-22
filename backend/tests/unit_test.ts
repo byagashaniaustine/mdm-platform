@@ -386,3 +386,23 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     await assert.rejects(() => blacklistAppsOnDevice(s, "d", [{ ...good, platform: 9 }], null), /Invalid platform code/);
   });
 }
+
+// Zoho's /blacklist/status returns an integer code with no documented enum.
+// The label helper must fall through to a literal "status N" for unknowns so
+// the UI never silently hides a code we haven't mapped yet.
+{
+  const { blacklistStatusLabel } = await import("../services/apps.ts");
+
+  Deno.test("blacklistStatusLabel maps known codes and falls through for unknowns", () => {
+    assert.equal(blacklistStatusLabel(1).label, "pending");
+    assert.equal(blacklistStatusLabel(2).tone, "ok");
+    assert.equal(blacklistStatusLabel(3).tone, "bad");
+    assert.equal(blacklistStatusLabel(4).label, "enforced");
+    // Unknown code: never swallow — surface the raw number.
+    assert.equal(blacklistStatusLabel(99).label, "status 99");
+    assert.equal(blacklistStatusLabel(99).tone, "muted");
+    // Null / undefined: no row from Zoho — explicit "no status".
+    assert.equal(blacklistStatusLabel(null).label, "no status");
+    assert.equal(blacklistStatusLabel(undefined).code, null);
+  });
+}

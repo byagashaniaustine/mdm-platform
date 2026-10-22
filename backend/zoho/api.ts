@@ -160,6 +160,13 @@ export const applyBlacklistToResources = (eid: string, resourceIds: Id[], appGro
   zohoRequest<Json>(eid, { method: "POST", path: "/blacklist/devices", body: { resource_ids: resourceIds, app_group_ids: appGroupIds } });
 export const removeBlacklistFromResources = (eid: string, resourceIds: Id[], appGroupIds: Id[]) =>
   zohoRequest<Json>(eid, { method: "DELETE", path: "/blacklist/devices", body: { resource_ids: resourceIds, app_group_ids: appGroupIds } });
+/**
+ * Zoho's ground-truth per-device enforcement status for every blacklisted app.
+ * Dev guide §7 (/blacklist/status). No query params — returns the whole
+ * enterprise's blacklist status; filter client-side by resourceId + identifier.
+ */
+export const blacklistStatus = (eid: string) =>
+  zohoRequest<Json>(eid, { path: "/blacklist/status" });
 
 // -------------------------------------------------------------------- users
 export const listUsers = (eid: string) => zohoPaginate<Json>(eid, "/users", "users");

@@ -328,6 +328,11 @@ async function refreshBlacklist(id, ctx, box) {
       parts.push(h("ul", { class: "list" }, direct.map((a) => h("li", {},
         h("strong", {}, a.appname),
         h("span", { class: "muted small" }, ` · ${a.identifier}`),
+        // Zoho's /blacklist/status is the ground truth: an app can be in our
+        // events journal yet never actually enforce on the phone (common on
+        // supervised iOS when the device hasn't checked in, or when Apple
+        // rejected the restriction).
+        a.enforcement ? badge(a.enforcement.label, a.enforcement.tone) : null,
         ctx.can("admin")
           ? h("button", { class: "btn btn-xs btn-ghost", type: "button", style: "margin-left: auto", onclick: async () => {
             try {
@@ -440,7 +445,12 @@ async function openBlacklistModal(id, device, onDone) {
         valid.push(e);
       }
       if (!valid.length) throw Object.assign(new Error("Pick at least one app or enter a valid package identifier"), { code: "VALIDATION_FAILED" });
-      toastEvent(await post(`/api/devices/${id}/blacklist`, { apps: valid }), `Blocked ${valid.length} app${valid.length === 1 ? "" : "s"}`);
+      // Don't crow about success — Zoho returning 200 means the command was
+      // dispatched, not that it enforced. The "Apps currently blocked" card
+      // now carries per-app status from /blacklist/status; point admins at
+      // that so they can see pending vs enforced vs failed.
+      const res = await post(`/api/devices/${id}/blacklist`, { apps: valid });
+      toastEvent(res, `Sent ${valid.length} block${valid.length === 1 ? "" : "s"} to Zoho — check status below`);
       onDone?.();
     } },
   ]);

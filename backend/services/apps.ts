@@ -427,18 +427,53 @@ export async function removeDeviceBlacklist(s: Session, deviceId: string, appGro
   return await deviceOp(s, "command.remove_blacklist", deviceId, { app_group_ids: appGroupIds.map(String) }, idem);
 }
 
+/**
+ * Translate Zoho's /blacklist/status integer code into a UI-ready label.
+ * The dev guide ships ONE example (status=4) and no enum, so these labels are
+ * empirical — update as we observe values in prod. Unknown codes fall through
+ * to a literal "status N" so we never silently swallow truth we don't recognise.
+ * Exported for unit testing.
+ */
+export function blacklistStatusLabel(code: number | null | undefined): { code: number | null; label: string; tone: "ok" | "warn" | "bad" | "muted" } {
+  if (code == null) return { code: null, label: "no status", tone: "muted" };
+  const n = Number(code);
+  const map: Record<number, { label: string; tone: "ok" | "warn" | "bad" }> = {
+    1: { label: "pending", tone: "warn" },
+    2: { label: "enforced", tone: "ok" },
+    3: { label: "failed", tone: "bad" },
+    4: { label: "enforced", tone: "ok" }, // dev guide's one example value
+  };
+  return map[n] ? { code: n, ...map[n] } : { code: n, label: `status ${n}`, tone: "muted" };
+}
+
 /** Summary for the device page: direct blocks (unblockable here) + group-origin blocks (informational). */
 export async function deviceBlacklistSummary(s: Session, deviceId: string) {
-  await getDevice(s.enterpriseId, deviceId);
-  const [direct, viaGroups, repo] = await Promise.all([
+  const device = await getDevice(s.enterpriseId, deviceId);
+  const [direct, viaGroups, repo, statusResp] = await Promise.all([
     directlyBlockedAppGroupIds(s.enterpriseId, deviceId),
     groupBlockedAppGroupIds(s.enterpriseId, deviceId),
     zoho.listBlacklistApps(s.enterpriseId) as Promise<{ apps?: { appgroupid?: string | number; identifier?: string; appname?: string; platform?: string | number }[] }>,
+    // Status may 404 on tenants that have never blacklisted — treat as "no rows".
+    zoho.blacklistStatus(s.enterpriseId).catch((e: { code?: string }) =>
+      e?.code === "ZOHO_NOT_FOUND" ? { Blackliststatus: [] } : Promise.reject(e)
+    ) as Promise<{ Blackliststatus?: { status?: number; resourceId?: number | string; identifier?: string }[] }>,
   ]);
   const byAppGroupId = new Map((repo.apps ?? []).filter((a) => a.appgroupid).map((a) => [String(a.appgroupid!), a]));
+  // Keyed by `${zoho_device_id}:${app identifier}` — the only combo Zoho's status
+  // row uniquely identifies. We'll look up by identifier (which we have via the
+  // repo join) and this device's Zoho ID.
+  const statusKey = (zdid: string, identifier: string) => `${zdid}:${identifier}`;
+  const statusByKey = new Map<string, number>();
+  for (const row of statusResp.Blackliststatus ?? []) {
+    if (row?.resourceId != null && row?.identifier && row?.status != null) {
+      statusByKey.set(statusKey(String(row.resourceId), String(row.identifier)), Number(row.status));
+    }
+  }
   const describe = (id: string) => {
     const a = byAppGroupId.get(id);
-    return { app_group_id: id, appname: a?.appname ?? a?.identifier ?? id, identifier: a?.identifier ?? "", platform: a?.platform ?? null };
+    const identifier = a?.identifier ?? "";
+    const enforcement = blacklistStatusLabel(identifier ? statusByKey.get(statusKey(String(device.zoho_device_id), identifier)) : null);
+    return { app_group_id: id, appname: a?.appname ?? a?.identifier ?? id, identifier, platform: a?.platform ?? null, enforcement };
   };
   return {
     direct: [...direct].map(describe),
