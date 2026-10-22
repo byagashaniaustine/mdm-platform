@@ -13,7 +13,7 @@ import {
   removeDeviceFromGroup,
   resetPasscodeOnGroup,
 } from "../services/groups.ts";
-import { blacklistAppsOnGroup, type BlacklistEntry, groupInstalledApps, installAppsOnGroup, removeBlacklistFromGroup, uninstallAppsFromGroup } from "../services/apps.ts";
+import { blacklistAppsOnGroup, type BlacklistEntry, groupBlacklistSummary, groupInstalledApps, installAppsOnGroup, removeBlacklistFromGroup, uninstallAppsFromGroup } from "../services/apps.ts";
 import { eventResponse } from "./helpers.ts";
 
 export function groupRoutes() {
@@ -89,6 +89,13 @@ export function groupRoutes() {
     if (!appIds.length) return c.json({ error: { code: "VALIDATION_FAILED", message: "appIds[] required" } }, 400);
     const { event } = await uninstallAppsFromGroup(c.get("session"), uuidParam(c.req.param("id")), appIds, idempotencyKey(c));
     return eventResponse(c, event);
+  });
+
+  // What's blacklisted via *this* group (per-group running tally from events,
+  // joined against the enterprise repo for names). Not the enterprise catalogue.
+  r.get("/:id/blacklist", async (c) => {
+    const data = await groupBlacklistSummary(c.get("session"), uuidParam(c.req.param("id")));
+    return c.json({ data });
   });
 
   // Blacklist apps on the group's devices.

@@ -168,22 +168,35 @@ export async function groupDetailView(el, ctx, id) {
   // Zoho's platform encoding on blacklist entries is numeric; map to our chip values.
   const PLATFORM_FROM_NUM = { 1: "ios", 2: "android", 3: "windows" };
 
+  // Inspect the first event's response to detect a server-side no-op (zero
+  // devices in group, or Zoho 404 meaning the app wasn't actually applied).
+  // Returns `{ noop, note }` when nothing changed, else null.
+  const inspectNoop = (res) => {
+    const ev = res?.data?.events?.[0];
+    const resp = ev?.response;
+    if (resp && (resp.unblocked === 0 || resp.blacklisted === 0) && resp.note) {
+      return { noop: true, note: String(resp.note) };
+    }
+    return null;
+  };
+
+  // What's actually applied via *this* group (not the enterprise catalogue).
   const showBlacklist = async () => {
-    let repo;
-    try { repo = await get("/api/apps/blacklist"); } catch (err) { return toastError(err); }
-    const rows = Array.isArray(repo?.apps) ? repo.apps : (Array.isArray(repo) ? repo : []);
-    const owner = ctx.can("owner");
+    let payload;
+    try { payload = await get(`/api/groups/${id}/blacklist`); } catch (err) { return toastError(err); }
+    const rows = Array.isArray(payload?.apps) ? payload.apps : [];
     const normalised = rows.map((a) => ({
       ...a,
       platform_name: PLATFORM_FROM_NUM[Number(a.platform)] ?? (typeof a.platform === "string" ? a.platform : "other"),
     }));
+    const owner = ctx.can("owner");
 
-    modal(`Blacklist repository`,
+    const handle = modal(`Apps blocked by ${g.name}`,
       h("div", { class: "stack" },
         h("p", { class: "muted small" },
-          "Apps in the Zoho enterprise blacklist repo. ",
-          h("strong", {}, "Unblock here"), " lifts it for this group only. ",
-          owner ? [h("strong", {}, "Remove from repo"), " nukes it from every group (owner only)."] : "",
+          "Only apps currently blocked via this group. ",
+          h("strong", {}, "Unblock"), " removes the block from every device in this group.",
+          owner ? [" See the ", h("strong", {}, "Enterprise repo"), " button on the group page to manage the catalogue."] : "",
         ),
         rows.length
           ? filterableList(normalised, {
@@ -197,21 +210,70 @@ export async function groupDetailView(el, ctx, id) {
               ),
               h("div", { class: "row-actions" },
                 h("button", { class: "btn btn-xs", type: "button", onclick: async () => {
-                  toastEvent(await post(`/api/groups/${id}/blacklist/remove`, { appGroupIds: [String(a.appgroupid)] }), "Unblocked on this group");
-                  reload();
-                } }, "Unblock here"),
-                owner ? h("button", { class: "btn btn-xs btn-ghost", type: "button", onclick: async () => {
                   try {
-                    await del("/api/apps/blacklist", { appGroupIds: [String(a.appgroupid)] });
-                    toast("Removed from enterprise blacklist repo", "ok");
+                    const res = await post(`/api/groups/${id}/blacklist/remove`, { appGroupIds: [String(a.app_group_id)] });
+                    const noop = inspectNoop(res);
+                    if (noop) {
+                      toast(noop.note, "warn");
+                    } else {
+                      toastEvent(res, "Unblocked on this group");
+                    }
+                    handle.close();
+                    reload();
                     showBlacklist();
                   } catch (err) { toastError(err); }
-                } }, "Remove from repo") : null,
+                } }, "Unblock"),
               ),
             ),
             empty: "No matches.",
           })
-          : h("p", { class: "muted" }, "Blacklist repo is empty. Blacklist an app to add one."),
+          : h("p", { class: "muted" }, "Nothing is blocked via this group."),
+      ),
+      [{ label: "Close" }]);
+  };
+
+  // The enterprise-wide blacklist catalogue — owner-only. "Remove from repo"
+  // deletes the app from Zoho's blacklist registry entirely (affects every
+  // group that referenced it).
+  const showEnterpriseRepo = async () => {
+    let repo;
+    try { repo = await get("/api/apps/blacklist"); } catch (err) { return toastError(err); }
+    const rows = Array.isArray(repo?.apps) ? repo.apps : (Array.isArray(repo) ? repo : []);
+    const normalised = rows.map((a) => ({
+      ...a,
+      platform_name: PLATFORM_FROM_NUM[Number(a.platform)] ?? (typeof a.platform === "string" ? a.platform : "other"),
+    }));
+
+    modal(`Enterprise blacklist repo`,
+      h("div", { class: "stack" },
+        h("p", { class: "muted small" },
+          "Catalogue of every app ever registered in Zoho's enterprise blacklist. ",
+          "Entries here are not per-group — they're the source list groups draw from. ",
+          h("strong", {}, "Remove from repo"), " deletes it everywhere.",
+        ),
+        rows.length
+          ? filterableList(normalised, {
+            search: (a) => `${a.appname ?? ""} ${a.identifier ?? ""}`,
+            platformKey: "platform_name",
+            platforms: PLATFORM_CHIPS,
+            render: (a) => h("div", { class: "blacklist-row" },
+              h("div", { class: "stack-tight" },
+                h("strong", {}, a.appname ?? "App"),
+                h("span", { class: "muted small" }, a.identifier ?? ""),
+              ),
+              h("div", { class: "row-actions" },
+                h("button", { class: "btn btn-xs btn-ghost", type: "button", onclick: async () => {
+                  try {
+                    await del("/api/apps/blacklist", { appGroupIds: [String(a.appgroupid)] });
+                    toast("Removed from enterprise blacklist repo", "ok");
+                    showEnterpriseRepo();
+                  } catch (err) { toastError(err); }
+                } }, "Remove from repo"),
+              ),
+            ),
+            empty: "No matches.",
+          })
+          : h("p", { class: "muted" }, "Repo is empty."),
       ),
       [{ label: "Close" }]);
   };
@@ -323,6 +385,7 @@ export async function groupDetailView(el, ctx, id) {
             g.devices.length ? h("button", { class: "btn btn-sm", type: "button", onclick: installApps }, "Install apps") : null,
             g.devices.length ? h("button", { class: "btn btn-sm", type: "button", onclick: blacklistApp }, "Blacklist app") : null,
             h("button", { class: "btn btn-sm", type: "button", onclick: showBlacklist }, "View blacklist"),
+            ctx.can("owner") ? h("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: showEnterpriseRepo }, "Enterprise repo") : null,
           ),
         ) : null,
         admin && g.devices.length ? h("section", { class: "card danger-zone" },

@@ -209,6 +209,44 @@ export async function removeBlacklistFromGroup(s: Session, groupId: string, appG
   return await op(s, "group.remove_blacklist", groupId, { app_group_ids: appGroupIds }, idem);
 }
 
+/** Running tally of appgroupids currently blocked via this one group, from its events. */
+async function groupBlockedAppGroupIdsForGroup(enterpriseId: string, groupId: string): Promise<Set<string>> {
+  const rows = await run<{ action: string; response: Record<string, unknown> | null }[]>(
+    db().from("events").select("action, response")
+      .eq("enterprise_id", enterpriseId).eq("group_id", groupId)
+      .in("action", ["group.blacklist_apps", "group.remove_blacklist"])
+      .eq("state", "succeeded")
+      .order("action_time", { ascending: true }),
+  );
+  const blocked = new Set<string>();
+  for (const r of rows) {
+    const ids = ((r.response ?? {}) as { app_group_ids?: unknown }).app_group_ids;
+    const list = Array.isArray(ids) ? ids.map(String) : [];
+    if (r.action === "group.blacklist_apps") list.forEach((id) => blocked.add(id));
+    else list.forEach((id) => blocked.delete(id));
+  }
+  return blocked;
+}
+
+/**
+ * What's actually blacklisted via *this* group (not the enterprise-wide repo).
+ * Joins the running event tally against the repo for human-readable names.
+ */
+export async function groupBlacklistSummary(s: Session, groupId: string) {
+  await getGroup(s.enterpriseId, groupId);
+  const [applied, repo] = await Promise.all([
+    groupBlockedAppGroupIdsForGroup(s.enterpriseId, groupId),
+    zoho.listBlacklistApps(s.enterpriseId) as Promise<{ apps?: { appgroupid?: string | number; identifier?: string; appname?: string; platform?: string | number }[] }>,
+  ]);
+  const byAppGroupId = new Map((repo.apps ?? []).filter((a) => a.appgroupid).map((a) => [String(a.appgroupid!), a]));
+  return {
+    apps: [...applied].map((id) => {
+      const a = byAppGroupId.get(id);
+      return { app_group_id: id, appname: a?.appname ?? a?.identifier ?? id, identifier: a?.identifier ?? "", platform: a?.platform ?? null };
+    }),
+  };
+}
+
 /**
  * Zoho's /blacklist/devices expects device IDs, not group IDs. Resolve the
  * group's current enrolled member device IDs so we can fan the blacklist across
