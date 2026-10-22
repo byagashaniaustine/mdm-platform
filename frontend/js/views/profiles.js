@@ -845,6 +845,12 @@ function profileWizard(el, ctx, catalog, existing) {
 
     clear(formBox,
       h("p", { class: "muted small" }, "iOS supervised-only. Shows a persistent message on the device lock screen. Pair with iOS Kiosk mode to lock the device to one app AND display help info."),
+      h("div", { class: "banner banner-warn", style: "margin-bottom:8px" }, h("div", {},
+        h("strong", {}, "Heads up — this rewrites the iOS lock-screen wallpaper. "),
+        "Removing this profile later stops the policy but ",
+        h("strong", {}, "doesn't restore the user's original wallpaper"),
+        " — the banner stays until the user picks a new wallpaper in Settings → Wallpaper, or you push a different wallpaper policy. Apple's MDM protocol has no revert-to-default primitive.",
+      )),
       field("Message", msg, "Up to 500 characters. Keep it short so it stays legible."),
       field("Background colour", bg),
       field("Text colour", fg),
