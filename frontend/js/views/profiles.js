@@ -797,22 +797,59 @@ function profileWizard(el, ctx, catalog, existing) {
     const bg = input({ type: "color", value: "#1F3A5F" });
     const fg = input({ type: "color", value: "#FFFFFF" });
     const orientation = select([{ value: "1", label: "Portrait" }, { value: "2", label: "Landscape" }]);
-    // Live preview so admins see the result immediately.
-    const preview = h("div", {
-      class: "lockscreen-preview",
-      style: "border-radius:16px; padding:36px 24px; min-height:120px; font-weight:500; text-align:center; display:flex; align-items:center; justify-content:center; white-space:pre-wrap; background:#1F3A5F; color:#FFFFFF;",
+    // 0 = very top (behind status bar on iPhone — don't use), 35 = guide default,
+    // 50 = middle, 100 = bottom. Anything < 15 risks hiding behind the notch/status bar.
+    const offset = input({ type: "range", min: 0, max: 100, step: 5, value: 35 });
+    const offsetLabel = h("span", { class: "muted small" }, "35% (default)");
+    // iPhone-shaped preview — matches real iPhone 11 → 18 metrics so the text
+    // position in the preview matches what shows on the device:
+    //  - 19.5:9 aspect ratio (all iPhones since X)
+    //  - ~54px corner radius scaled to our width (iPhone has 47.33pt / 55px)
+    //  - 7px bezel (titanium / stainless frame)
+    //  - Dynamic Island (14 Pro / 15 / 16 / 17 / 18) OR notch (11-14 non-Pro) at top
+    //  - Time + status chrome at the top safe area so admins see the clash
+    const previewText = h("div", {
+      style: "padding:12px 20px; font-weight:500; text-align:center; white-space:pre-wrap; font-size:13px;",
     }, "This device belongs to Acme POS. For help call +255 712 345 678.");
+    const topFiller = h("div", { style: "flex:0" });
+    const bottomFiller = h("div", { style: "flex:1" });
+    // Time (left) + status glyphs (right), typical iOS lock screen chrome.
+    const timeDisplay = h("div", { style: "font-size:11px; font-weight:600; opacity:0.9" }, "9:41");
+    const statusGlyphs = h("div", { style: "font-size:10px; opacity:0.9; letter-spacing:3px" }, "••••  5G  🔋");
+    const statusBar = h("div", { style: "padding:14px 32px 6px; display:flex; justify-content:space-between; align-items:center;" }, timeDisplay, statusGlyphs);
+    // Dynamic Island — black pill, centered, below the status chrome.
+    const island = h("div", { style: "width:112px; height:34px; border-radius:20px; background:#000; margin:0 auto 10px; position:relative; z-index:2;" });
+    const screen = h("div", {
+      class: "lockscreen-preview",
+      style: "border-radius:46px; display:flex; flex-direction:column; background:#1F3A5F; color:#FFFFFF; overflow:hidden; aspect-ratio:9/19.5;",
+    }, statusBar, island, topFiller, previewText, bottomFiller);
+    // iPhone body — black bezel around the screen.
+    const preview = h("div", {
+      style: "max-width:240px; margin:0 auto; padding:6px; background:#1a1a1c; border-radius:54px; box-shadow:0 20px 60px -20px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.08) inset;",
+    }, screen);
+
     const refresh = () => {
-      preview.style.background = bg.value;
-      preview.style.color = fg.value;
-      preview.textContent = msg.value.trim() || "Your message will show here on the lock screen.";
+      screen.style.background = bg.value;
+      screen.style.color = fg.value;
+      timeDisplay.style.color = fg.value;
+      statusGlyphs.style.color = fg.value;
+      previewText.textContent = msg.value.trim() || "Your message will show here on the lock screen.";
+      const pct = Number(offset.value);
+      // Space above text (safe area + top filler) = pct; space below = 100 - pct.
+      topFiller.style.flex = String(pct);
+      bottomFiller.style.flex = String(100 - pct);
+      offsetLabel.textContent = `${pct}%${pct === 35 ? " (default)" : pct < 15 ? " — risks hiding behind the Dynamic Island / notch" : ""}`;
     };
-    for (const el of [msg, bg, fg]) el.addEventListener("input", refresh);
+    for (const el of [msg, bg, fg, offset]) el.addEventListener("input", refresh);
+    refresh();
+
     clear(formBox,
       h("p", { class: "muted small" }, "iOS supervised-only. Shows a persistent message on the device lock screen. Pair with iOS Kiosk mode to lock the device to one app AND display help info."),
       field("Message", msg, "Up to 500 characters. Keep it short so it stays legible."),
       field("Background colour", bg),
       field("Text colour", fg),
+      field("Vertical position", h("div", { class: "row", style: "gap:8px; align-items:center" }, offset, offsetLabel),
+        "0% = very top (hidden by status bar), 35% ≈ upper third (default), 50% = middle, 100% = bottom."),
       field("Orientation", orientation),
       h("h4", { class: "section-head" }, "preview"),
       preview,
@@ -823,7 +860,7 @@ function profileWizard(el, ctx, catalog, existing) {
       return {
         bgColour: bg.value,
         orientation: Number(orientation.value),
-        messages: [{ message: text, textColour: fg.value }],
+        messages: [{ message: text, textColour: fg.value, offsetPosition: Number(offset.value) }],
       };
     };
   }

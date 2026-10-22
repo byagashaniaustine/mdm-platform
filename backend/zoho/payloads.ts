@@ -829,7 +829,7 @@ const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/;
 export function buildIosLockscreenMessagePayload(input: {
   bgColour: string;             // "#1F3A5F" — required when wallpaper_type=1
   orientation?: 1 | 2;          // 1 portrait, 2 landscape (default 1)
-  messages: { message: string; textColour: string }[];
+  messages: { message: string; textColour: string; offsetPosition?: number }[];
 }) {
   if (!HEX_COLOUR.test(input.bgColour)) fail("VALIDATION_FAILED", "bgColour must look like #1F3A5F");
   if (!input.messages.length) fail("VALIDATION_FAILED", "Add at least one message line");
@@ -837,12 +837,22 @@ export function buildIosLockscreenMessagePayload(input: {
     if (!m.message?.trim()) fail("VALIDATION_FAILED", "Each message needs non-empty text");
     if (!HEX_COLOUR.test(m.textColour)) fail("VALIDATION_FAILED", `textColour '${m.textColour}' must look like #FFFFFF`);
     if (m.message.length > 500) fail("VALIDATION_FAILED", "Message is too long (max 500 chars)");
+    if (m.offsetPosition !== undefined && (m.offsetPosition < 0 || m.offsetPosition > 100)) {
+      fail("VALIDATION_FAILED", "offsetPosition must be between 0 (very top) and 100 (bottom)");
+    }
   }
   return {
-    wallpaper_type: 1,    // 1 = custom bg colour (we don't do file upload)
+    wallpaper_type: 1,
     bg_colour: input.bgColour,
     orientation: input.orientation ?? 1,
-    messages: input.messages.map((m) => ({ message: m.message, text_colour: m.textColour })),
+    // Guide: "offset_position usually specified in percentage. For first message, 35 is
+    // considered as the default value." If the admin didn't choose a position, send 35
+    // so iOS doesn't put the text behind the status bar at the very top.
+    messages: input.messages.map((m) => ({
+      message: m.message,
+      text_colour: m.textColour,
+      offset_position: m.offsetPosition ?? 35,
+    })),
   };
 }
 

@@ -183,7 +183,7 @@ export function buildPayload(platform: "android" | "ios", purpose: Purpose, conf
       body: buildIosLockscreenMessagePayload({
         bgColour: String(config.bgColour ?? "#1F3A5F"),
         orientation: config.orientation as 1 | 2 | undefined,
-        messages: (config.messages ?? []) as { message: string; textColour: string }[],
+        messages: (config.messages ?? []) as { message: string; textColour: string; offsetPosition?: number }[],
       }),
     };
   }
