@@ -455,10 +455,18 @@ function profileWizard(el, ctx, catalog, existing) {
         if (n === 4) return "macOS";
         return `platform ${pt ?? "?"}`;
       };
-      const header = h("p", { class: "muted small" },
-        `${ios.length} iOS app${ios.length === 1 ? "" : "s"} in your Zoho repo`,
-        otherPlatformCount ? ` (${otherPlatformCount} non-iOS hidden)` : "",
-        ". To add more: open ME MDM console → Device Mgmt → App Repository → Add App.",
+      const header = h("div", { class: "row", style: "align-items:baseline; gap:12px" },
+        h("p", { class: "muted small", style: "margin:0" },
+          `${ios.length} iOS app${ios.length === 1 ? "" : "s"} in your Zoho repo`,
+          otherPlatformCount ? ` (${otherPlatformCount} non-iOS hidden)` : "",
+          ".",
+        ),
+        h("a", {
+          class: "btn btn-xs",
+          href: "https://mdm.manageengine.com/mdm/webclient/AppRepository.do",
+          target: "_blank",
+          rel: "noopener noreferrer",
+        }, "+ Add in Zoho"),
       );
       if (ios.length) {
         clear(appsBox, header, ...ios.map(renderRepoRow));
