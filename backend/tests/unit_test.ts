@@ -278,19 +278,26 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
   Deno.test("iOS kiosk routes to applockpolicy with guide field shape", () => {
     const single = buildPayload("ios", "kiosk", { mode: "single", apps: [{ appId: "9007199254741861", displayName: "POS" }] });
     assert.equal(single.name, "applockpolicy");
-    assert.equal((single.body as Record<string, unknown>).kiosk_mode, 1); // 1 = single per guide
+    assert.equal((single.body as Record<string, unknown>).kiosk_mode, 1);
     assert.equal((single.body as Record<string, unknown>).disable_auto_lock, true);
-    const sApps = JSON.parse((single.body as Record<string, string>).allowed_apps);
-    assert.deepEqual(sApps, [{ app_id: 9007199254741861, is_system_app: false, group_display_name: "POS" }]);
-    const multi = buildIosKioskPayload({ mode: "multi", apps: [{ appId: 111, displayName: "A" }, { appId: 222 }] });
-    assert.equal(multi.kiosk_mode, 2); // 2 = multi
-    assert.equal((multi as Record<string, unknown>).allowed_apps, undefined);
-    assert.deepEqual(JSON.parse(multi.autonomous_kiosk_apps as string), [
-      { app_id: 111, is_system_app: false, group_display_name: "A" },
-      { app_id: 222, is_system_app: false, group_display_name: "222" },
-    ]);
+    // Precision check: 9007199254741861 is past 2^53, so Number() would mangle it.
+    // Confirm the JSON string preserves the exact digits.
+    const sJson = (single.body as Record<string, string>).allowed_apps;
+    assert.ok(sJson.includes("9007199254741861"), "exact app_id digits must be preserved");
+    const sApps = JSON.parse(sJson);
+    assert.equal(sApps[0].group_display_name, "POS");
+    assert.equal(sApps[0].is_system_app, false);
+    // Multi mode also writes allowed_apps per the guide samples.
+    const multi = buildIosKioskPayload({ mode: "multi", apps: [{ appId: "111", displayName: "A" }, { appId: "222" }] });
+    assert.equal(multi.kiosk_mode, 2);
+    assert.ok(!("autonomous_kiosk_apps" in multi), "guide samples use allowed_apps for both modes");
+    const mApps = JSON.parse(multi.allowed_apps as string);
+    assert.equal(mApps.length, 2);
+    assert.equal(mApps[1].group_display_name, "222");
+    // Multi-mode must NOT send mode-1-only toggle fields.
+    assert.ok(!("disable_touch" in multi));
     assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [] }));
-    assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [{ appId: 1 }, { appId: 2 }] }));
+    assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [{ appId: "1" }, { appId: "2" }] }));
     assert.throws(() => buildIosKioskPayload({ mode: "single", apps: [{ appId: "com.not-numeric" }] }));
   });
 

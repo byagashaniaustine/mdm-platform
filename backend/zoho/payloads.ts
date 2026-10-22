@@ -577,19 +577,28 @@ export function buildIosKioskPayload(input: {
       fail("VALIDATION_FAILED", `iOS kiosk needs the numeric app_id from the Zoho app repo. '${a.appId}' isn't one. Upload the app to Zoho first.`);
     }
   }
-  const appsJson = JSON.stringify(input.apps.map((a) => ({
-    app_id: Number(a.appId),
-    is_system_app: a.isSystemApp ?? false,
-    group_display_name: a.displayName ?? String(a.appId),
-  })));
-  // Guide: kiosk_mode is 1 (single) or 2 (multi).
+  // Build the JSON string manually: Zoho's app_ids (e.g. 9007199254741861) sit right at
+  // JavaScript's safe-integer boundary (2^53 = 9007199254740992). Routing them through
+  // Number() loses the last digit — Zoho then can't find the app. Preserving the exact
+  // digit string here avoids that.
+  const esc = (s: string) => JSON.stringify(s); // handles quoting/escaping of the display name
+  const parts = input.apps.map((a) => {
+    const idDigits = String(a.appId);
+    const name = esc(a.displayName ?? idDigits);
+    const isSys = a.isSystemApp ?? false;
+    return `{"app_id":${idDigits},"is_system_app":${isSys},"group_display_name":${name}}`;
+  });
+  const appsJson = `[${parts.join(",")}]`;
+  // Guide: kiosk_mode is 1 (single) or 2 (multi). Both guide SAMPLES use `allowed_apps`
+  // — the field table claims autonomous_kiosk_apps for mode 2, but the actual sample
+  // JSON for kiosk_mode:2 still writes allowed_apps. Samples win over tables.
   const base: Record<string, unknown> = {
     kiosk_mode: input.mode === "single" ? 1 : 2,
+    allowed_apps: appsJson,
     disable_auto_lock: input.disableAutoLock ?? true,
   };
   if (input.mode === "single") {
-    // Guide: all the toggle fields below are "Applicable only for kiosk_mode 1".
-    base.allowed_apps = appsJson;
+    // Toggles are mode-1 only per the field table.
     base.disable_touch = input.disableTouch ?? false;
     base.disable_device_rotation = input.disableDeviceRotation ?? false;
     base.disable_volume_buttons = input.disableVolumeButtons ?? false;
@@ -601,8 +610,6 @@ export function buildIosKioskPayload(input: {
     base.asst_touch = input.asstTouch ?? false;
     base.enable_speak_selection = input.enableSpeakSelection ?? false;
     base.enable_mono_audio = input.enableMonoAudio ?? false;
-  } else {
-    base.autonomous_kiosk_apps = appsJson;
   }
   return base;
 }
