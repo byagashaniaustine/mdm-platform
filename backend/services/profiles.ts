@@ -41,6 +41,7 @@ export const PURPOSES: Purpose[] = [
   "vpn",
   "email",
   "proxy",
+  "lockscreen_message",
   "custom",
 ];
 
@@ -326,16 +327,28 @@ export async function createProfile(s: Session, input: {
   if (existing?.profile_id) {
     zid = String(existing.profile_id);
   } else {
-    const created = await zoho.createProfile(s.enterpriseId, {
-      name: input.name,
-      description: input.description ?? "",
-      platformType: input.platform === "ios" ? 1 : 2,
-      scope: 0,
-    });
-    const rawZid = (created as { profile_id?: string | number }).profile_id;
-    if (!rawZid) fail("ZOHO_BAD_REQUEST", "Zoho did not return a profile_id");
-    zid = String(rawZid);
-    shellJustCreated = true;
+    try {
+      const created = await zoho.createProfile(s.enterpriseId, {
+        name: input.name,
+        description: input.description ?? "",
+        platformType: input.platform === "ios" ? 1 : 2,
+        scope: 0,
+      });
+      const rawZid = (created as { profile_id?: string | number }).profile_id;
+      if (!rawZid) fail("ZOHO_BAD_REQUEST", "Zoho did not return a profile_id");
+      zid = String(rawZid);
+      shellJustCreated = true;
+    } catch (e) {
+      // Zoho's listProfiles doesn't surface trashed profiles, but Zoho's name-
+      // uniqueness check does — so a prior failed attempt or a manually-trashed
+      // profile with the same name causes 409 "Resource Already Exists" that
+      // we can't adopt. Give a clearer error so the admin knows what to do.
+      const err = String((e as { message?: string }).message ?? e);
+      if (/already exists/i.test(err)) {
+        fail("CONFLICT", `A Zoho profile named "${input.name}" already exists (likely in Zoho's Trash). Pick a different name, or empty the Trash in the ME MDM console under Device Mgmt → Profiles → Trash.`);
+      }
+      throw e;
+    }
   }
 
   try {
