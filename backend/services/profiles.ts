@@ -490,6 +490,42 @@ registerExecutor("profile.delete", async (ev) => {
   const p = await getProfile(ev.enterprise_id, ev.profile_id!);
   let zohoDeleted = false;
   if (p.zoho_profile_id) {
+    const zpid = String(p.zoho_profile_id);
+
+    // iOS lock-screen message rewrites the device wallpaper. Apple's MDM has no
+    // "restore previous wallpaper" primitive, so plain removal leaves the branded
+    // banner stuck as the lock-screen until the user manually picks a new one.
+    // Before deleting, overwrite the payload with a neutral black wallpaper +
+    // blank text and re-publish, so the device transitions to a plain black lock
+    // screen on next check-in. Then the delete runs and nothing proprietary
+    // lingers.
+    if (p.purpose === "lockscreen_message" && (p.payload_names ?? []).includes("ioslockscreenmessage")) {
+      try {
+        await zoho.addPayload(ev.enterprise_id, zpid, "ioslockscreenmessage", {
+          wallpaper_type: 1,
+          bg_colour: "#000000",
+          orientation: 1,
+          // Single invisible glyph so Zoho's "message required" check passes
+          // while the device shows effectively no text on a black background.
+          messages: [{ message: " ", text_colour: "#000000", offset_position: 50 }],
+        });
+        await zoho.publishProfile(ev.enterprise_id, zpid);
+        const { log } = await import("../lib/log.ts");
+        log("info", "profile.delete_wallpaper_reset", { enterprise_id: ev.enterprise_id, profile_id: p.id, zoho_profile_id: zpid });
+        // Give iOS a few seconds to pick up the new wallpaper via APNs before
+        // we yank the profile out from under it. 10s is a compromise between
+        // deletion latency and leaving enough window for the device to see the
+        // push. Devices offline during this window still show the neutral
+        // wallpaper on next check-in.
+        await new Promise((r) => setTimeout(r, 10_000));
+      } catch (e) {
+        // Best-effort — if Zoho rejects the neutral payload or publish fails
+        // we still proceed with delete. The warning stays on the create form.
+        const { log } = await import("../lib/log.ts");
+        log("warn", "profile.delete_wallpaper_reset_failed", { enterprise_id: ev.enterprise_id, profile_id: p.id, error: String(e) });
+      }
+    }
+
     // Disassociate from EVERY Zoho group that still has this profile — not just
     // the ones our local DB knows about. Our profile_groups mirror can be
     // stale (sync lag, or a profile pushed outside the group model) and if we
@@ -497,7 +533,6 @@ registerExecutor("profile.delete", async (ev) => {
     // because Zoho never pushes a RemoveProfile command for the ones we missed.
     // Scanning all groups costs N listGroupProfiles calls but makes delete
     // actually take effect on the device.
-    const zpid = String(p.zoho_profile_id);
     try {
       const groups = (await zoho.listGroups(ev.enterprise_id)) as { group_id?: string | number }[];
       for (const g of groups) {
