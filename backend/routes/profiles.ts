@@ -13,6 +13,7 @@ import {
 } from "../services/profiles.ts";
 import { listApps } from "../zoho/api.ts";
 import { deleteFromBlacklistRepo, enterpriseInstalledApps, listBlacklistApps } from "../services/apps.ts";
+import { kickBackgroundSync } from "../services/sync.ts";
 import { eventResponse } from "./helpers.ts";
 
 export function profileRoutes() {
@@ -20,7 +21,13 @@ export function profileRoutes() {
   r.use("*", requireSession);
 
   r.get("/catalog", (c) => c.json({ data: profileCatalog() }));
-  r.get("/", async (c) => c.json({ data: await listProfiles(c.get("session").enterpriseId) }));
+  r.get("/", async (c) => {
+    const eid = c.get("session").enterpriseId;
+    // Proactive freshness: fire a background sync (debounced 30s) so admins
+    // always see current Zoho state on page load, not just after the 15-min cron.
+    kickBackgroundSync(eid, ["profiles"]);
+    return c.json({ data: await listProfiles(eid) });
+  });
   r.get("/:id", async (c) => {
     const s = c.get("session");
     const data = await run(

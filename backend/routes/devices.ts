@@ -8,6 +8,7 @@ import { blacklistAppsOnDevice, deviceBlacklistSummary, deviceInstalledApps, rem
 import { clearDeviceCommands, recordAudit } from "../services/events.ts";
 import { removeDeviceFromAllGroups } from "../services/groups.ts";
 import { getDevice } from "../services/lookup.ts";
+import { kickBackgroundSync } from "../services/sync.ts";
 import { getCommandHistory } from "../zoho/api.ts";
 import { zohoRequest } from "../zoho/client.ts";
 import { eventResponse, intQuery, maskDevice } from "./helpers.ts";
@@ -35,6 +36,9 @@ export function deviceRoutes() {
 
   r.get("/", async (c) => {
     const s = c.get("session");
+    // Proactive freshness: fire a background sync (debounced 30s) so admins see
+    // current Zoho state on page load, not only after the 15-min cron.
+    kickBackgroundSync(s.enterpriseId, ["devices"]);
     let q = db().from("devices").select(DEVICE_COLUMNS).eq("enterprise_id", s.enterpriseId)
       .eq("is_removed", c.req.query("removed") === "true").order("device_name").limit(intQuery(c.req.query("limit"), 500, 2000));
     const platform = c.req.query("platform");

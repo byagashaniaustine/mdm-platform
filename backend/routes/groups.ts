@@ -14,13 +14,20 @@ import {
   resetPasscodeOnGroup,
 } from "../services/groups.ts";
 import { blacklistAppsOnGroup, type BlacklistEntry, groupBlacklistSummary, groupInstalledApps, installAppsOnGroup, removeBlacklistFromGroup, uninstallAppsFromGroup } from "../services/apps.ts";
+import { kickBackgroundSync } from "../services/sync.ts";
 import { eventResponse } from "./helpers.ts";
 
 export function groupRoutes() {
   const r = new Hono<AppEnv>();
   r.use("*", requireSession);
 
-  r.get("/", async (c) => c.json({ data: await listGroups(c.get("session").enterpriseId) }));
+  r.get("/", async (c) => {
+    const eid = c.get("session").enterpriseId;
+    // Proactive freshness: fire a background sync (debounced 30s) so admins see
+    // current Zoho state on page load, not only after the 15-min cron.
+    kickBackgroundSync(eid, ["groups"]);
+    return c.json({ data: await listGroups(eid) });
+  });
   r.get("/:id", async (c) => c.json({ data: await groupDetail(c.get("session").enterpriseId, uuidParam(c.req.param("id"))) }));
 
   r.post("/", requireRole("admin"), async (c) => {

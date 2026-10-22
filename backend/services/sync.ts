@@ -580,6 +580,32 @@ export async function syncEnterprise(
   }
 }
 
+/**
+ * Fire a background sync for one or more resources, debounced per enterprise+
+ * resource for ~30s so repeated page loads don't thrash Zoho. Returns
+ * immediately; the sync runs in the background and silently skips if another
+ * sync is already running (opts.quietIfBusy).
+ *
+ * Use from `GET /api/profiles` and friends so admins always see fresh Zoho
+ * state when they open a page, without waiting for the 15-min scheduled cron.
+ */
+const kickDebounce = new Map<string, number>(); // key = enterprise:resource
+const KICK_DEBOUNCE_MS = 30_000;
+export function kickBackgroundSync(eid: string, resources: Resource[], adminId: string | null = null): void {
+  const now = Date.now();
+  const due = resources.filter((r) => now - (kickDebounce.get(`${eid}:${r}`) ?? 0) > KICK_DEBOUNCE_MS);
+  if (!due.length) return;
+  for (const r of due) kickDebounce.set(`${eid}:${r}`, now);
+  // Fire-and-forget. Errors are logged but don't propagate — this is best-effort.
+  (async () => {
+    try {
+      await syncEnterprise(eid, due, adminId, { quietIfBusy: true });
+    } catch (e) {
+      log("warn", "sync.kick_failed", { enterprise_id: eid, resources: due, error: String(e) });
+    }
+  })();
+}
+
 async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId: string | null, renew: () => Promise<boolean>) {
   const ordered = [...ALL, ...OPTIONAL].filter((r) => resources.includes(r));
   const result: Record<string, number | string> = {};
