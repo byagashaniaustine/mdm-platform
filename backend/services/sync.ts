@@ -208,6 +208,21 @@ async function syncGroups(eid: string): Promise<number> {
       await db().from("groups").update({ member_count: ids.length }).eq("id", g.id);
     }));
   }
+
+  // Groups no longer in Zoho — hard-delete (unlike profiles there's no soft-delete
+  // state on groups). Clean up profile/device links too so the FK constraints hold.
+  const seen = new Set(rows.map((r) => String(r.zoho_group_id)));
+  const localAll = await run<{ id: string; zoho_group_id: string | null }[]>(
+    db().from("groups").select("id, zoho_group_id").eq("enterprise_id", eid).not("zoho_group_id", "is", null),
+  );
+  const vanished = localAll.filter((g) => !seen.has(String(g.zoho_group_id))).map((g) => g.id);
+  if (vanished.length) {
+    await run(db().from("group_devices").delete().in("group_id", vanished));
+    await run(db().from("profile_groups").delete().in("group_id", vanished));
+    await run(db().from("groups").delete().in("id", vanished));
+    log("info", "sync.groups_vanished_from_zoho", { enterprise_id: eid, count: vanished.length });
+  }
+
   return saved.length;
 }
 
@@ -287,6 +302,21 @@ async function syncProfiles(eid: string): Promise<number> {
     };
   });
   if (rows.length) await run(db().from("profiles").upsert(rows, { onConflict: "enterprise_id,zoho_profile_id" }));
+
+  // Profiles no longer in Zoho (permanently deleted via console, or never there in
+  // the first place) get soft-deleted locally. Same pattern as devices sync — keep
+  // the row for history, hide it with state='deleted' so listProfiles ignores it.
+  const seen = new Set(rows.map((r) => String(r.zoho_profile_id)));
+  const localActive = await run<{ id: string; zoho_profile_id: string; name: string | null }[]>(
+    db().from("profiles").select("id, zoho_profile_id, name").eq("enterprise_id", eid).neq("state", "deleted").not("zoho_profile_id", "is", null),
+  );
+  const toRemove = localActive.filter((p) => !seen.has(String(p.zoho_profile_id)));
+  if (toRemove.length) {
+    await run(db().from("profiles").update({ state: "deleted" }).in("id", toRemove.map((p) => p.id)));
+    await run(db().from("profile_groups").delete().in("profile_id", toRemove.map((p) => p.id)));
+    log("info", "sync.profiles_vanished_from_zoho", { enterprise_id: eid, count: toRemove.length, names: toRemove.slice(0, 10).map((p) => p.name) });
+  }
+
   await syncProfileGroups(eid);
   return rows.length;
 }
