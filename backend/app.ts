@@ -13,6 +13,8 @@ import { appRoutes, profileRoutes } from "./routes/profiles.ts";
 import { announcementRoutes } from "./routes/announcements.ts";
 import { eventRoutes, overviewRoutes } from "./routes/events.ts";
 import { alertRoutes, locationRoutes, monitoringRoutes } from "./routes/monitoring.ts";
+import { fineractWebhookRoutes } from "./routes/fineract.ts";
+import { automationRoutes } from "./routes/automation.ts";
 
 // Importing the services registers their executors.
 import "./services/commands.ts";
@@ -56,7 +58,13 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
     }),
   );
 
-  app.use("/api/*", csrfGuard, rateLimit({ name: "api", windowMs: 60_000, max: 300 }));
+  // CSRF guard on /api/*, except the Fineract webhook — that endpoint is called
+  // server-to-server by Fineract and is authenticated by HMAC on the raw body
+  // (see routes/fineract.ts). Rate-limiting still applies.
+  app.use("/api/*", async (c, next) => {
+    if (c.req.path === "/api/fineract/hooks") return next();
+    return csrfGuard(c, next);
+  }, rateLimit({ name: "api", windowMs: 60_000, max: 300 }));
   app.use("/api/*", async (c, next) => {
     await next();
     c.header("Cache-Control", "no-store");
@@ -76,6 +84,8 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   app.route("/api/monitoring", monitoringRoutes());
   app.route("/api/alerts", alertRoutes());
   app.route("/api/locations", locationRoutes());
+  app.route("/api/fineract", fineractWebhookRoutes());
+  app.route("/api/automation", automationRoutes());
   app.route("/api", overviewRoutes());
 
   app.notFound((c) => (c.req.path.startsWith("/api")

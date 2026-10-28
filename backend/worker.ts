@@ -20,10 +20,12 @@ import "./services/groups.ts";
 import "./services/profiles.ts";
 import "./services/apps.ts";
 import "./services/announcements.ts";
+import { dailyTickAll } from "./services/bridge/automation.ts";
 
 let ticking = false;
 let lastSync = 0;
 let lastPurge = 0;
+let lastAutomationTick = 0;
 
 export async function tick(): Promise<void> {
   if (ticking) return; // never overlap
@@ -73,6 +75,17 @@ export async function tick(): Promise<void> {
       }
     }
     await monitoringTick(cfg.syncIntervalMinutes);
+
+    // Loan-driven automation tick (dry-run in Phase 0). Honours per-enterprise
+    // automation_settings.enabled; enterprises without a row are skipped entirely.
+    if (Date.now() - lastAutomationTick > cfg.automationTickMinutes * 60_000) {
+      lastAutomationTick = Date.now();
+      try {
+        await dailyTickAll();
+      } catch (e) {
+        log("warn", "worker.automation_tick_failed", { error: String(e) });
+      }
+    }
   } catch (e) {
     log("error", "worker.tick_failed", { error: String(e) });
   } finally {

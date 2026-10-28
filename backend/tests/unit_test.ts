@@ -7,6 +7,7 @@ Deno.env.set("ENCRYPTION_KEY", btoa(String.fromCharCode(...new Uint8Array(32).fi
 Deno.env.set("HASH_PEPPER", "unit-test-pepper");
 
 const { buildAndroidWallpaperPayload, buildIosWallpaperPayload, buildKioskPayload, buildPasscodePayload, buildRestrictionsPayload } = await import("../zoho/payloads.ts");
+const { tierFor } = await import("../services/bridge/tiers.ts");
 const { decryptSecret, encryptSecret, hmacHex, randomDigits } = await import("../lib/crypto.ts");
 const { toSafeHtml } = await import("../services/announcements.ts");
 const { backoffMs } = await import("../services/events.ts");
@@ -91,6 +92,72 @@ Deno.test("kiosk payload rejects invalid launcher / orientation / timeout", () =
   assert.throws(() => buildKioskPayload({ mode: "single", apps, launcherType: 9 as 1 | 2 }));
   assert.throws(() => buildKioskPayload({ mode: "single", apps, screenOrientation: 99 as 1 }));
   assert.throws(() => buildKioskPayload({ mode: "single", apps, screenTimeout: 7 }));
+});
+
+// ------------------------------- loan-automation tier engine (bridge/tiers.ts)
+Deno.test("tierFor: closed and overpaid loans are released regardless of DPD", () => {
+  const t = "2026-10-28";
+  for (const status of ["closed", "overpaid"] as const) {
+    assert.equal(tierFor({ status, dueOn: "2026-10-20", dpd: 30, productId: 1 }, t), "released");
+  }
+});
+
+Deno.test("tierFor: written_off stays locked (manual-only release — spec §15)", () => {
+  const t = "2026-10-28";
+  assert.equal(tierFor({ status: "written_off", dueOn: "2026-09-01", dpd: 57, productId: 2 }, t), "locked");
+});
+
+Deno.test("tierFor: no dueOn yet → disbursed", () => {
+  const t = "2026-10-28";
+  assert.equal(tierFor({ status: "active", dueOn: null, dpd: 0, productId: 1 }, t), "disbursed");
+});
+
+Deno.test("tierFor: DUE_2D window fires at T-2 and T-1, not T-3", () => {
+  const t = "2026-10-28";
+  // dueOn in 3 days → disbursed; in 2/1/0 days → due_2d (not yet overdue).
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-31", dpd: 0, productId: 1 }, t), "disbursed");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-30", dpd: 0, productId: 1 }, t), "due_2d");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-29", dpd: 0, productId: 1 }, t), "due_2d");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-28", dpd: 0, productId: 1 }, t), "due_2d");
+});
+
+Deno.test("tierFor: truth table across products 1/2/3 for DPD -3 … +20", () => {
+  const t = "2026-10-28";
+  // Pre-overdue cases drive dueOn forward; overdue cases drive dueOn backward.
+  // Negative "dpd" is shorthand for "N days before due"; Fineract itself never
+  // reports negative DPD, so we pass dpd=0 and shift dueOn instead.
+  const offsetDueOn = (daysOffsetFromToday: number): string => {
+    const d = new Date(Date.UTC(2026, 9, 28)); // 2026-10-28
+    d.setUTCDate(d.getUTCDate() + daysOffsetFromToday);
+    return d.toISOString().slice(0, 10);
+  };
+  type Want = "disbursed" | "due_2d" | "overdue_2d" | "locked";
+  const expected: Record<number, Record<number, Want>> = {
+    // 7-Day: kSoft=2, L=5
+    1: { "-3": "disbursed", "-2": "due_2d", "-1": "due_2d", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 4: "overdue_2d", 5: "locked", 10: "locked", 20: "locked" },
+    // 14-Day: kSoft=2, L=8
+    2: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 7: "overdue_2d", 8: "locked", 20: "locked" },
+    // 28-Day: kSoft=2, L=15
+    3: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 14: "overdue_2d", 15: "locked", 20: "locked" },
+  };
+  for (const productId of [1, 2, 3]) {
+    for (const [key, want] of Object.entries(expected[productId])) {
+      const n = Number(key);
+      const dpd = Math.max(0, n);
+      // dpd=0 means "not yet overdue"; shift dueOn n days from today (negative = future).
+      // dpd>0 means dueOn was that many days ago.
+      const dueOn = dpd === 0 ? offsetDueOn(-n) : offsetDueOn(-dpd);
+      const got = tierFor({ status: "active", dueOn, dpd, productId }, t);
+      assert.equal(got, want, `product=${productId} key=${key} dueOn=${dueOn} dpd=${dpd}: want ${want}, got ${got}`);
+    }
+  }
+});
+
+Deno.test("tierFor: unknown product id falls back to shortest-term thresholds (never grants extra grace)", () => {
+  const t = "2026-10-28";
+  // Default k_soft=2, L=7. DPD 7 on an unknown product must lock.
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-21", dpd: 7, productId: 99 }, t), "locked");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-26", dpd: 2, productId: 99 }, t), "overdue_2d");
 });
 
 Deno.test("passcode payload validates the wipe threshold", () => {

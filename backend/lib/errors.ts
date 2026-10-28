@@ -34,6 +34,13 @@ export const ERROR_CATALOG = {
   TRACKING_DISABLED: { status: 409, message: "Location tracking is turned off for this enterprise.", retryable: false },
   CONSENT_REQUIRED: { status: 400, message: "Confirm that employees have been informed before enabling tracking.", retryable: false },
   MAX_RETRIES_EXCEEDED: { status: 500, message: "Gave up after several retries; moved to backlog.", retryable: false },
+  FINERACT_UNCONFIGURED: { status: 412, message: "Fineract integration is not configured on this server.", retryable: false },
+  FINERACT_UNAUTHORIZED: { status: 502, message: "Fineract rejected the service credentials.", retryable: false },
+  FINERACT_BAD_REQUEST: { status: 502, message: "Fineract rejected the request.", retryable: false },
+  FINERACT_NOT_FOUND: { status: 404, message: "The item does not exist in Fineract.", retryable: false },
+  FINERACT_UNAVAILABLE: { status: 503, message: "Fineract is unavailable. Will retry.", retryable: true },
+  AUTOMATION_DISABLED: { status: 412, message: "Loan-driven automation is disabled for this enterprise.", retryable: false },
+  AUTOMATION_HELD: { status: 409, message: "Automation batch exceeded blast-radius caps; held, nothing applied.", retryable: false },
   INTERNAL: { status: 500, message: "Unexpected server error.", retryable: false },
 } as const;
 

@@ -25,6 +25,16 @@ export type Config = Readonly<{
   deviceStaleHours: number; // > this since last Zoho check-in → UI shows "stale" badge
   deviceZombieDays: number; // > this since last check-in → auto-mark is_removed in sync
   cookieSecure: boolean;
+  // --- Loan-driven device automation (LOAN_DEVICE_AUTOMATION.md) ---
+  // All optional: if fineractBaseUrl is empty the Bridge stays dormant and the
+  // app boots the same as before. Supplied here for the automation worker + the
+  // /api/fineract/hooks ingress; actual values live in .env (never committed).
+  fineractBaseUrl: string;
+  fineractTenantId: string;
+  fineractUsername: string;
+  fineractPassword: string;
+  fineractWebhookSecret: string;        // HMAC fallback when per-enterprise automation_settings.webhook_secret_enc isn't set
+  automationTickMinutes: number;        // daily tick cadence (default 60 = hourly reconcile, cheaper than one-shot per day for Phase 0)
 }>;
 
 const DEFAULT_SCOPES = [
@@ -80,6 +90,12 @@ export function getConfig(): Config {
     deviceStaleHours: num("DEVICE_STALE_HOURS", 48),
     deviceZombieDays: num("DEVICE_ZOMBIE_DAYS", 14),
     cookieSecure: env("COOKIE_SECURE", appEnv === "production" ? "true" : "false") === "true",
+    fineractBaseUrl: env("FINERACT_BASE_URL", "").replace(/\/$/, ""),
+    fineractTenantId: env("FINERACT_TENANT_ID", "default"),
+    fineractUsername: env("FINERACT_USERNAME", ""),
+    fineractPassword: env("FINERACT_PASSWORD", ""),
+    fineractWebhookSecret: env("FINERACT_WEBHOOK_SECRET", ""),
+    automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 60),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");
