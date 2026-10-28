@@ -360,6 +360,9 @@ export function buildRestrictionsPayload(
   return out;
 }
 
+// `appId` is Zoho's app_group_id (resolved from the app repo via getAppLabelDetail),
+// NOT a package name. Android kiosk rejects unknown ids with COM0008; `packageName`
+// is kept only for the local validation layer and never sent to Zoho.
 export type KioskApp = { appId: string; packageName: string; name?: string };
 
 // Allowed values for Zoho's enum-typed kiosk fields.
@@ -376,9 +379,10 @@ export function buildKioskPayload(input: {
   allowHomeButton?: boolean;
   allowBackButton?: boolean;
   allowPowerButton?: boolean;
-  allowVolumeButton?: boolean;
   allowShutdown?: boolean;
   allowKeyGuard?: boolean;
+  // allow_volume_button is listed in the dev guide but rejected by live Zoho
+  // (IAM0018) — no accepted alias found. Volume control stays user-settable.
   // UI chrome
   allowNotification?: boolean;
   allowRecentApps?: boolean;
@@ -394,18 +398,14 @@ export function buildKioskPayload(input: {
 }) {
   if (!input.apps.length) fail("VALIDATION_FAILED", "Kiosk needs at least one app");
   if (input.mode === "single" && input.apps.length !== 1) fail("VALIDATION_FAILED", "Single-app kiosk takes exactly one app");
-  const allowed: Record<string, unknown> = {};
-  for (const a of input.apps) {
+  // Confirmed against live Zoho (COM0005 → COM0008 error cascade): the POST shape
+  // is a JSON ARRAY of {app_id, group_display_name}. The dev guide's object-keyed
+  // shape with SHOW_APP_ICON/APP_GROUP_ID/IDENTIFIER is Zoho's GET response, not
+  // what POST accepts. app_id must be a real Zoho app_group_id (COM0008 otherwise).
+  const allowed = input.apps.map((a) => {
     if (!/^[a-zA-Z][\w.]+$/.test(a.packageName)) fail("VALIDATION_FAILED", `Invalid package name ${a.packageName}`);
-    allowed[a.appId] = {
-      SHOW_APP_ICON: true,
-      APP_GROUP_ID: a.appId,
-      GROUP_DISPLAY_NAME: a.name ?? a.packageName,
-      IDENTIFIER: a.packageName,
-      APP_TYPE: 1,
-      DISPLAY_IMAGE_LOC: "",
-    };
-  }
+    return { app_id: Number(a.appId), group_display_name: a.name ?? a.packageName };
+  });
 
   const launcherType = input.launcherType ?? 2;
   const screenOrientation = input.screenOrientation ?? 2;
@@ -421,13 +421,12 @@ export function buildKioskPayload(input: {
   const allowStatusBarExpansion = input.allowStatusBarExpansion ?? (allowStatusBar ? true : false);
   const allowPowerButton = input.allowPowerButton ?? true;
 
-  // Field names below are the ones fully legible in the guide's ANDROID_KIOSK_POLICY table.
+  // screen_orientation and screen_timeout are NESTED inside kiosk_custom_settings
+  // per the guide — they're IAM0018-rejected at the top level.
   return {
     kiosk_mode: input.mode === "single" ? 0 : 1, // 0 single app, 1 multi app
-    allowed_apps: JSON.stringify(allowed), // the API expects a JSON string
+    allowed_apps: JSON.stringify(allowed),
     launcher_type: launcherType,
-    screen_orientation: screenOrientation,
-    screen_timeout: screenTimeout,
     allow_status_bar: allowStatusBar,
     allow_status_bar_expansion: allowStatusBarExpansion,
     allow_home_button: input.allowHomeButton ?? true,
@@ -435,7 +434,6 @@ export function buildKioskPayload(input: {
     allow_power_button: allowPowerButton,
     // Zoho's spec: allow_shutdown defaults to the value of allow_power_button.
     allow_shutdown: input.allowShutdown ?? allowPowerButton,
-    allow_volume_button: input.allowVolumeButton ?? true,
     allow_key_guard: input.allowKeyGuard ?? true,
     allow_notification: input.allowNotification ?? true,
     allow_recent_apps: input.allowRecentApps ?? true,
@@ -443,6 +441,10 @@ export function buildKioskPayload(input: {
     allow_system_error_dialog: input.allowSystemErrorDialog ?? false,
     allow_custom_settings: input.allowCustomSettings ?? true,
     show_me_mdm_app: input.showMeMdmApp ?? true,
+    kiosk_custom_settings: {
+      screen_orientation: screenOrientation,
+      screen_timeout: screenTimeout,
+    },
     ...(input.extra ?? {}),
   };
 }

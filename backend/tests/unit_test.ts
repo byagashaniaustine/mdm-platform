@@ -43,24 +43,29 @@ Deno.test("restrictions reject out-of-range and bad enum/boolean values", () => 
   assert.throws(() => buildRestrictionsPayload({ brightness_value: -1 }));       // < min
 });
 
-Deno.test("kiosk payload encodes allowed_apps as a JSON string", () => {
-  const p = buildKioskPayload({ mode: "single", apps: [{ appId: "42", packageName: "com.acme.pos" }] });
+Deno.test("kiosk payload encodes allowed_apps as a JSON array of {app_id, group_display_name}", () => {
+  const p = buildKioskPayload({ mode: "single", apps: [{ appId: "247008000000124034", packageName: "com.acme.pos", name: "Acme POS" }] });
   assert.equal(p.kiosk_mode, 0);
-  assert.equal(JSON.parse(p.allowed_apps as string)["42"].IDENTIFIER, "com.acme.pos");
+  const apps = JSON.parse(p.allowed_apps as string) as { app_id: number; group_display_name: string }[];
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].app_id, 247008000000124034);
+  assert.equal(apps[0].group_display_name, "Acme POS");
   assert.throws(() => buildKioskPayload({ mode: "single", apps: [] }));
   assert.throws(() => buildKioskPayload({ mode: "single", apps: [{ appId: "1", packageName: "bad name!" }] }));
 });
 
 Deno.test("kiosk payload fills every Zoho field with sensible defaults", () => {
   const p = buildKioskPayload({ mode: "single", apps: [{ appId: "1", packageName: "com.a.b" }] });
-  // Launcher / display defaults
+  // Launcher at top level
   assert.equal(p.launcher_type, 2);
-  assert.equal(p.screen_orientation, 2);
-  assert.equal(p.screen_timeout, 0);
+  // screen_orientation and screen_timeout live inside kiosk_custom_settings per Zoho's live API.
+  const kcs = p.kiosk_custom_settings as { screen_orientation: number; screen_timeout: number };
+  assert.equal(kcs.screen_orientation, 2);
+  assert.equal(kcs.screen_timeout, 0);
   // Shutdown mirrors power button when not set
   assert.equal(p.allow_shutdown, p.allow_power_button);
-  // All the new buttons / chrome fields are present
-  for (const k of ["allow_volume_button", "allow_key_guard", "allow_notification", "allow_recent_apps", "allow_task_manager", "allow_system_error_dialog", "allow_custom_settings", "show_me_mdm_app", "allow_status_bar_expansion"]) {
+  // All the chrome / button fields Zoho actually accepts
+  for (const k of ["allow_key_guard", "allow_notification", "allow_recent_apps", "allow_task_manager", "allow_system_error_dialog", "allow_custom_settings", "show_me_mdm_app", "allow_status_bar_expansion"]) {
     assert.ok(k in p, `missing ${k}`);
   }
 });

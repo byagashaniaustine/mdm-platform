@@ -48,39 +48,16 @@ async function tryPayload(platform: 1 | 2, payloadName: string, body: Record<str
 }
 
 // ───────────────────────────────── Android kiosk ─────────────────────────────────
-// Mirrors backend/zoho/payloads.ts::buildKioskPayload: allowed_apps is a JSON STRING
-// of an OBJECT keyed by appId. UPPERCASE fields. No Zoho app_id needed — Android kiosk
-// uses IDENTIFIER (package name) as the real match.
-// Guide sample uses a numeric string key (resembles a Zoho app_id). Try that
-// instead of the "manual-<ts>" shape — Zoho's parser may reject non-numeric keys.
-const androidAppId = String(Date.now()); // just digits
-const androidAllowed = {
-  [androidAppId]: {
-    SHOW_APP_ICON: true,
-    APP_GROUP_ID: androidAppId,
-    GROUP_DISPLAY_NAME: "Chrome",
-    IDENTIFIER: "com.android.chrome",
-    APP_TYPE: 1,
-    DISPLAY_IMAGE_LOC: "",
-  },
-};
+// Live Zoho requires `allowed_apps` as a JSON STRING of an ARRAY of
+// {app_id, group_display_name}. The dev guide's object-keyed shape with
+// SHOW_APP_ICON/APP_GROUP_ID/IDENTIFIER is Zoho's GET response, not what POST
+// accepts. app_id must be a Zoho-registered app_group_id (COM0008 otherwise).
+// This probe uses a bogus id so expect COM0008 "Unknown id" — that confirms the
+// shape is accepted. To test a real push, resolve a registered Android app via
+// listApps → getAppLabelDetail (same flow as the iOS probe below).
 await tryPayload(2, "androidkioskpolicy", {
   kiosk_mode: 0,
-  allowed_apps: JSON.stringify(androidAllowed),
-  launcher_type: 2,
-});
-
-// Guide uses the uppercase form `ANDROID_KIOSK_POLICY`. Try both to see which Zoho actually accepts.
-await tryPayload(2, "ANDROID_KIOSK_POLICY", {
-  kiosk_mode: 0,
-  allowed_apps: JSON.stringify(androidAllowed),
-  launcher_type: 2,
-});
-
-// Also try sending allowed_apps as a plain object, not stringified.
-await tryPayload(2, "androidkioskpolicy", {
-  kiosk_mode: 0,
-  allowed_apps: androidAllowed, // not stringified
+  allowed_apps: '[{"app_id":247008000000999999,"group_display_name":"Chrome"}]',
   launcher_type: 2,
 });
 

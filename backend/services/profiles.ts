@@ -217,7 +217,6 @@ export function buildPayload(platform: "android" | "ios", purpose: Purpose, conf
           allowHomeButton: config.allowHomeButton as boolean | undefined,
           allowBackButton: config.allowBackButton as boolean | undefined,
           allowPowerButton: config.allowPowerButton as boolean | undefined,
-          allowVolumeButton: config.allowVolumeButton as boolean | undefined,
           allowShutdown: config.allowShutdown as boolean | undefined,
           allowKeyGuard: config.allowKeyGuard as boolean | undefined,
           allowNotification: config.allowNotification as boolean | undefined,

@@ -260,7 +260,6 @@ function profileWizard(el, ctx, catalog, existing) {
       const homeButton = h("input", { type: "checkbox", checked: true });
       const backButton = h("input", { type: "checkbox", checked: true });
       const powerButton = h("input", { type: "checkbox", checked: true });
-      const volumeButton = h("input", { type: "checkbox", checked: true });
       const shutdown = h("input", { type: "checkbox", checked: true });
       const keyGuard = h("input", { type: "checkbox", checked: true });
       // UI chrome
@@ -284,7 +283,7 @@ function profileWizard(el, ctx, catalog, existing) {
         // Classic kiosk lockdown: hide every button + chrome, keep power + volume.
         statusBar.checked = false; statusBarExpansion.checked = false;
         homeButton.checked = false; backButton.checked = false;
-        powerButton.checked = true; volumeButton.checked = true; shutdown.checked = false; keyGuard.checked = false;
+        powerButton.checked = true; shutdown.checked = false; keyGuard.checked = false;
         notification.checked = false; recentApps.checked = false; taskManager.checked = false;
         systemError.checked = false; customSettings.checked = false; mdmApp.checked = false;
         launcher.value = "2"; orientation.value = "2"; timeout.value = "2147483647";
@@ -307,7 +306,6 @@ function profileWizard(el, ctx, catalog, existing) {
           checkbox(homeButton, "Allow home button"),
           checkbox(backButton, "Allow back button"),
           checkbox(powerButton, "Allow power button"),
-          checkbox(volumeButton, "Allow volume buttons"),
           checkbox(shutdown, "Allow shutdown"),
           checkbox(keyGuard, "Allow unlock without passcode (key guard)"),
         ),
@@ -345,7 +343,6 @@ function profileWizard(el, ctx, catalog, existing) {
         allowHomeButton: homeButton.checked,
         allowBackButton: backButton.checked,
         allowPowerButton: powerButton.checked,
-        allowVolumeButton: volumeButton.checked,
         allowShutdown: shutdown.checked,
         allowKeyGuard: keyGuard.checked,
         allowNotification: notification.checked,
