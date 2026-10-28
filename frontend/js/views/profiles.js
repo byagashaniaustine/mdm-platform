@@ -874,10 +874,19 @@ function profileWizard(el, ctx, catalog, existing) {
     );
     position.addEventListener("change", rerender);
 
+    const androidLockNote = isIos ? null : h("div", { class: "banner banner-info", style: "margin-bottom:8px" }, h("div", {},
+      h("strong", {}, "Need a lock-screen message? "),
+      "Android has no dedicated lock-screen-message profile in Zoho (iOS does — use the “Lock-screen message” purpose there). ",
+      "The workaround is to bake the text into the wallpaper image itself (e.g. in Figma, Photoshop, or Canva) and upload that. ",
+      "Most Android launchers reuse the home wallpaper on the lock screen, so a line like ",
+      h("em", {}, "“Property of Acme POS — call +255 712 345 678”"),
+      " shows up when the device is locked.",
+    ));
     clear(formBox,
       h("p", { class: "muted small" }, isIos
         ? "Push a wallpaper image to iOS devices. PNG or JPEG, under 2 MB, RGB (greyscale is rejected by Apple)."
         : "Push a wallpaper image to Android devices. PNG or JPEG, under 2 MB. 960×800 is Zoho's recommended resolution."),
+      ...(androidLockNote ? [androidLockNote] : []),
       field("Position", position),
       homeGroup,
       lockGroup,
