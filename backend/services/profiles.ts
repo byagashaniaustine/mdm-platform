@@ -7,6 +7,7 @@ import {
   ANDROID_RESTRICTIONS,
   type AppProfileEntry,
   type BlacklistProfileEntry,
+  buildAndroidWallpaperPayload,
   buildAppBlacklistPayload,
   buildAppsPayload,
   buildFrpPayload,
@@ -18,6 +19,7 @@ import {
   buildIosPasscodePayload,
   buildIosProxyPayload,
   buildIosVpnPayload,
+  buildIosWallpaperPayload,
   buildIosWebFilterPayload,
   buildIosWifiPayload,
   buildRestrictionsPayload,
@@ -42,6 +44,7 @@ export const PURPOSES: Purpose[] = [
   "email",
   "proxy",
   "lockscreen_message",
+  "wallpaper",
   "custom",
 ];
 
@@ -53,6 +56,7 @@ export function profileCatalog() {
       { id: "passcode", label: "Passcode + wipe after failed attempts", platforms: ["android", "ios"] },
       { id: "frp", label: "Factory Reset Protection accounts", platforms: ["android"] },
       { id: "lockscreen_message", label: "Lock-screen message (iOS supervised)", platforms: ["ios"] },
+      { id: "wallpaper", label: "Wallpaper (upload an image)", platforms: ["android", "ios"] },
       // iOS Wi-Fi, Web content filter, VPN, Email, Proxy are temporarily hidden from
       // the UI: the builders I wrote had wrong Zoho field names (singleappmodepolicy,
       // bundle_identifier, EmailType*, filter_type strings, etc.) and the guide shows
@@ -68,7 +72,7 @@ export function profileCatalog() {
 
 /** Turn the dashboard form into { payloadName: body }. */
 export function buildPayload(platform: "android" | "ios", purpose: Purpose, config: Record<string, unknown>) {
-  const IOS_ALLOWED = ["restrictions", "passcode", "kiosk", "wifi", "webfilter", "vpn", "email", "proxy", "lockscreen_message", "custom"];
+  const IOS_ALLOWED = ["restrictions", "passcode", "kiosk", "wifi", "webfilter", "vpn", "email", "proxy", "lockscreen_message", "wallpaper", "custom"];
   if (platform === "ios" && !IOS_ALLOWED.includes(purpose)) {
     fail("VALIDATION_FAILED", `For Apple devices choose one of: ${IOS_ALLOWED.join(", ")}`);
   }
@@ -184,6 +188,30 @@ export function buildPayload(platform: "android" | "ios", purpose: Purpose, conf
         bgColour: String(config.bgColour ?? "#1F3A5F"),
         orientation: config.orientation as 1 | 2 | undefined,
         messages: (config.messages ?? []) as { message: string; textColour: string; offsetPosition?: number }[],
+      }),
+    };
+  }
+  if (purpose === "wallpaper") {
+    // Admin uploads an image via /api/profiles/wallpaper-upload which returns a
+    // Zoho fileID. The frontend stores that fileID in config and we pass it here.
+    if (platform === "ios") {
+      return {
+        name: payloadNameFor(platform, purpose)!,
+        body: buildIosWallpaperPayload({
+          position: Number(config.position ?? 3) as 1 | 2 | 3 | 4,
+          homeFileId: config.homeFileId as string | undefined,
+          lockFileId: config.lockFileId as string | undefined,
+          allowChange: config.allowChange as boolean | undefined,
+        }),
+      };
+    }
+    return {
+      name: payloadNameFor(platform, purpose)!,
+      body: buildAndroidWallpaperPayload({
+        fileId: String(config.fileId ?? ""),
+        highDpiFileId: config.highDpiFileId as string | undefined,
+        position: config.position as 1 | 2 | 3 | undefined,
+        allowChange: config.allowChange as boolean | undefined,
       }),
     };
   }

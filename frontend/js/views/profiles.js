@@ -1,4 +1,4 @@
-import { del, get, post } from "../api.js";
+import { del, get, post, uploadFile } from "../api.js";
 import { COMMON_ANDROID_APPS, COMMON_IOS_APPS } from "../common-apps.js";
 import { ago, badge, clear, emptyState, field, h, icon, input, loading, modal, pageHeader, responsive, select, toast, toastError, toastEvent } from "../ui.js";
 
@@ -97,6 +97,8 @@ function profileWizard(el, ctx, catalog, existing) {
       renderIosProxy();
     } else if (kind === "lockscreen_message" && plat() === "ios") {
       renderIosLockscreenMessage();
+    } else if (kind === "wallpaper") {
+      renderWallpaper();
     } else if (kind === "restrictions") {
       const restrictionList = plat() === "ios" ? catalog.ios.restrictions : catalog.restrictions;
       // Per restriction kind: binary / enum use <select>, integer uses <input type=number>,
@@ -787,6 +789,114 @@ function profileWizard(el, ctx, catalog, existing) {
       pacUrl: pac.value.trim(),
       allowBypass: bypass.checked,
     });
+  }
+
+  function renderWallpaper() {
+    // Admin picks an image → we upload to /api/profiles/wallpaper-upload →
+    // backend uploads to Zoho /emsapi/files → returns a fileID → we attach it
+    // to the wallpaper policy on submit. Supports both platforms; iOS has an
+    // extra position selector (lock vs home vs both vs different per screen).
+    const isIos = plat() === "ios";
+
+    const homeFile = h("input", { type: "file", accept: "image/png,image/jpeg" });
+    const lockFile = h("input", { type: "file", accept: "image/png,image/jpeg" });
+    const homePreview = h("img", { style: "max-width:140px; max-height:200px; border-radius:8px; display:none;" });
+    const lockPreview = h("img", { style: "max-width:140px; max-height:200px; border-radius:8px; display:none;" });
+    const homeStatus = h("span", { class: "muted small" }, "no image chosen");
+    const lockStatus = h("span", { class: "muted small" }, "no image chosen");
+    let homeFileId = null;
+    let lockFileId = null;
+
+    const position = isIos
+      ? select([
+          { value: "3", label: "Both screens (same image)" },
+          { value: "1", label: "Lock screen only" },
+          { value: "2", label: "Home screen only" },
+          { value: "4", label: "Different image for each" },
+        ])
+      : select([
+          { value: "3", label: "Tile (repeat)" },
+          { value: "1", label: "Center" },
+          { value: "2", label: "Stretch to fill" },
+        ]);
+    const allowChange = h("input", { type: "checkbox" });
+
+    function previewLocal(file, img) {
+      if (!file) { img.style.display = "none"; return; }
+      const url = URL.createObjectURL(file);
+      img.src = url;
+      img.style.display = "block";
+    }
+
+    async function uploadOne(file, statusEl, target) {
+      if (!file) return null;
+      if (file.size > 2_000_000) { statusEl.textContent = "image too big (max 2 MB)"; return null; }
+      statusEl.textContent = "uploading…";
+      try {
+        const r = await uploadFile("/api/profiles/wallpaper-upload", file);
+        statusEl.textContent = `✓ uploaded (${file.name})`;
+        if (target === "home") homeFileId = r.fileId;
+        if (target === "lock") lockFileId = r.fileId;
+        return r.fileId;
+      } catch (err) {
+        statusEl.textContent = `upload failed: ${err.message}`;
+        toastError(err);
+        return null;
+      }
+    }
+
+    homeFile.addEventListener("change", async () => {
+      const f = homeFile.files?.[0] ?? null;
+      previewLocal(f, homePreview);
+      await uploadOne(f, homeStatus, "home");
+    });
+    lockFile.addEventListener("change", async () => {
+      const f = lockFile.files?.[0] ?? null;
+      previewLocal(f, lockPreview);
+      await uploadOne(f, lockStatus, "lock");
+    });
+
+    const rerender = () => {
+      // iOS positions 1 and 4 require a lock image; 2 and 3 use home only; 4 needs both.
+      const pos = Number(position.value);
+      const showHome = !isIos || pos !== 1;
+      const showLock = isIos && (pos === 1 || pos === 4);
+      lockGroup.style.display = showLock ? "" : "none";
+      homeGroup.style.display = showHome ? "" : "none";
+    };
+    const homeGroup = h("div", { class: "stack" },
+      field(isIos ? "Home-screen image" : "Image", h("div", { class: "row", style: "gap:12px; align-items:center" }, homeFile, homeStatus)),
+      homePreview,
+    );
+    const lockGroup = h("div", { class: "stack" },
+      field("Lock-screen image", h("div", { class: "row", style: "gap:12px; align-items:center" }, lockFile, lockStatus)),
+      lockPreview,
+    );
+    position.addEventListener("change", rerender);
+
+    clear(formBox,
+      h("p", { class: "muted small" }, isIos
+        ? "Push a wallpaper image to iOS devices. PNG or JPEG, under 2 MB, RGB (greyscale is rejected by Apple)."
+        : "Push a wallpaper image to Android devices. PNG or JPEG, under 2 MB. 960×800 is Zoho's recommended resolution."),
+      field("Position", position),
+      homeGroup,
+      lockGroup,
+      h("label", { class: "pick" }, allowChange, h("span", {}, "Let the user change wallpaper from Settings")),
+    );
+    rerender();
+
+    collect = () => {
+      if (isIos) {
+        const pos = Number(position.value);
+        const needHome = pos !== 1;
+        const needLock = pos === 1 || pos === 4;
+        if (needHome && !homeFileId) throw Object.assign(new Error("Upload a home-screen image first"), { code: "VALIDATION_FAILED" });
+        if (needLock && !lockFileId) throw Object.assign(new Error("Upload a lock-screen image first"), { code: "VALIDATION_FAILED" });
+        return { position: pos, homeFileId, lockFileId, allowChange: allowChange.checked };
+      }
+      if (!homeFileId) throw Object.assign(new Error("Upload an image first"), { code: "VALIDATION_FAILED" });
+      return { fileId: homeFileId, position: Number(position.value), allowChange: allowChange.checked };
+    };
   }
 
   function renderIosLockscreenMessage() {

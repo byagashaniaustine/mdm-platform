@@ -59,3 +59,23 @@ function apiError(code, message, status, details) {
 export const get = (path) => api("GET", path).then((r) => r.data);
 export const post = (path, body, opts) => api("POST", path, body ?? {}, opts);
 export const del = (path, body, opts) => api("DELETE", path, body, opts);
+
+/** POST multipart/form-data. Browser sets Content-Type (with boundary). */
+export async function uploadFile(path, file, extraFields = {}) {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  for (const [k, v] of Object.entries(extraFields)) fd.append(k, String(v));
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "x-mdm-request": "1", "idempotency-key": newIdempotencyKey() },
+    credentials: "same-origin",
+    body: fd,
+  });
+  const json = await res.json().catch(() => null);
+  if (res.status === 401) { onUnauthorized(); throw apiError("AUTH_REQUIRED", "Session ended", 401); }
+  if (!res.ok) {
+    const e = json?.error ?? {};
+    throw apiError(e.code ?? "HTTP_" + res.status, e.message ?? `Upload failed (${res.status})`, res.status, e.details);
+  }
+  return json?.data;
+}

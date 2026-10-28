@@ -279,6 +279,48 @@ export async function zohoRequest<T = unknown>(enterpriseId: string, req: ZohoRe
   throw lastErr ?? appError("INTERNAL", "Zoho request failed");
 }
 
+/**
+ * Upload a file to Zoho via the recommended /emsapi/files endpoint. Lives on
+ * the host root, NOT under /api/v1/mdm. Required header: `Module` naming the
+ * usage (e.g. MDM_PROFILES_IMAGES for wallpaper images). Returns Zoho's
+ * fileID as a string (snowflake-sized — never Number() it).
+ *
+ * The handler is picky about Accept — "application/json" returns 406; omit it.
+ */
+export async function uploadFileToZoho(
+  enterpriseId: string,
+  module: string,
+  file: { bytes: Uint8Array; filename: string; contentType: string },
+): Promise<{ fileId: string; fileName: string; expiryDate: string }> {
+  const conn = await getConnection(enterpriseId);
+  const host = conn.api_base.replace(/\/api\/v1\/mdm$/, "");
+  const url = `${host}/emsapi/files`;
+  const token = await getAccessToken(enterpriseId);
+
+  const fd = new FormData();
+  // Deno's lib dom types want BlobPart (ArrayBuffer | TypedArray with ArrayBuffer backing).
+  // Uint8Array<ArrayBufferLike> isn't accepted directly — slice the underlying buffer.
+  const buf = file.bytes.buffer.slice(file.bytes.byteOffset, file.bytes.byteOffset + file.bytes.byteLength) as ArrayBuffer;
+  fd.append("file", new Blob([buf], { type: file.contentType }), file.filename);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Zoho-oauthtoken ${token}`, Module: module },
+    body: fd,
+    signal: AbortSignal.timeout(60_000),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    log("warn", "zoho.file_upload_failed", { module, status: res.status, body: text.slice(0, 300) });
+    throw appError("ZOHO_BAD_REQUEST", `File upload failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  // Response is a JSON ARRAY with one entry per uploaded file.
+  const parsed = JSON.parse(text) as { fileID: string; fileName: string; expiryDate: string }[];
+  const first = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!first?.fileID) fail("ZOHO_BAD_REQUEST", "Zoho did not return a fileID");
+  return { fileId: String(first.fileID), fileName: first.fileName, expiryDate: first.expiryDate };
+}
+
 /** Return the first array found in a Zoho list response ({devices:[...]}, {groups:[...]}, ...). */
 export function firstArray<T = Record<string, unknown>>(data: unknown, preferredKey?: string): T[] {
   if (Array.isArray(data)) return data as T[];

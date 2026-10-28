@@ -12,6 +12,8 @@ import {
   PURPOSES,
 } from "../services/profiles.ts";
 import { listApps } from "../zoho/api.ts";
+import { uploadFileToZoho } from "../zoho/client.ts";
+import { fail } from "../lib/errors.ts";
 import { deleteFromBlacklistRepo, enterpriseInstalledApps, listBlacklistApps } from "../services/apps.ts";
 import { kickBackgroundSync } from "../services/sync.ts";
 import { eventResponse } from "./helpers.ts";
@@ -66,6 +68,22 @@ export function profileRoutes() {
   r.post("/:id/publish", requireRole("admin"), async (c) => {
     const { event } = await publishProfile(c.get("session"), uuidParam(c.req.param("id")), idempotencyKey(c));
     return eventResponse(c, event);
+  });
+
+  // Upload a wallpaper image to Zoho and return its fileID so the frontend can
+  // reference it when creating/updating a wallpaper policy. multipart/form-data
+  // with the image under the `file` field; module locks to MDM_PROFILES_IMAGES.
+  r.post("/wallpaper-upload", requireRole("admin"), async (c) => {
+    const form = await c.req.raw.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) fail("VALIDATION_FAILED", "Expected multipart field 'file' with the image");
+    if (!["image/png", "image/jpeg"].includes(file.type)) fail("VALIDATION_FAILED", "Only PNG and JPEG images are supported");
+    if (file.size > 2_000_000) fail("VALIDATION_FAILED", "Image must be under 2 MB");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const out = await uploadFileToZoho(c.get("session").enterpriseId, "MDM_PROFILES_IMAGES", {
+      bytes, filename: file.name || "wallpaper.png", contentType: file.type,
+    });
+    return c.json({ data: out });
   });
 
   r.delete("/:id", requireRole("owner"), async (c) => {

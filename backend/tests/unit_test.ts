@@ -6,7 +6,7 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", Deno.env.get("SUPABASE_SERVICE_ROLE_KE
 Deno.env.set("ENCRYPTION_KEY", btoa(String.fromCharCode(...new Uint8Array(32).fill(7))));
 Deno.env.set("HASH_PEPPER", "unit-test-pepper");
 
-const { buildKioskPayload, buildPasscodePayload, buildRestrictionsPayload } = await import("../zoho/payloads.ts");
+const { buildAndroidWallpaperPayload, buildIosWallpaperPayload, buildKioskPayload, buildPasscodePayload, buildRestrictionsPayload } = await import("../zoho/payloads.ts");
 const { decryptSecret, encryptSecret, hmacHex, randomDigits } = await import("../lib/crypto.ts");
 const { toSafeHtml } = await import("../services/announcements.ts");
 const { backoffMs } = await import("../services/events.ts");
@@ -436,3 +436,44 @@ Deno.test("data spike needs a baseline and ignores idle periods", () => {
     assert.equal(blacklistStatusLabel(undefined).code, null);
   });
 }
+
+Deno.test("Android wallpaper payload preserves 18-digit fileID as string", () => {
+  const id = "247008000000158325";
+  const p = buildAndroidWallpaperPayload({ fileId: id });
+  assert.equal(p.below_hdpi_wallpaper, id);                      // string, not Number()
+  assert.equal(p.above_hdpi_wallpaper, id);                      // defaults to the same id
+  assert.equal(p.is_below_hdpi_wall_modified, true);
+  assert.equal(p.is_above_hdpi_wall_modified, true);
+  assert.equal(p.set_wallpaper_position, 3);
+  // allowChange omitted -> field omitted entirely (Zoho's "None" default)
+  assert.ok(!("allow_wallpaper_change" in p));
+});
+
+Deno.test("Android wallpaper rejects non-numeric fileIDs", () => {
+  assert.throws(() => buildAndroidWallpaperPayload({ fileId: "not-a-number" }));
+  assert.throws(() => buildAndroidWallpaperPayload({ fileId: "123", highDpiFileId: "bad!" }));
+  assert.throws(() => buildAndroidWallpaperPayload({ fileId: "123", position: 9 as 1 }));
+});
+
+Deno.test("iOS wallpaper payload: position 3 fans one image to both screens", () => {
+  const id = "247008000000158325";
+  const p = buildIosWallpaperPayload({ position: 3, homeFileId: id });
+  assert.equal(p.set_wallpaper_position, 3);
+  assert.equal(p.below_hdpi_wallpaper, id);                       // home
+  assert.equal(p.below_hdpi_lock_wallpaper, id);                  // lock falls back to home for pos=3
+  assert.equal(p.is_below_hdpi_wall_modified, true);
+  assert.equal(p.is_below_hdpi_lock_wall_modified, true);
+});
+
+Deno.test("iOS wallpaper payload requires the right image per position", () => {
+  // Position 1 = lock only; needs lockFileId.
+  assert.throws(() => buildIosWallpaperPayload({ position: 1, homeFileId: "123" }));
+  // Position 2 = home only; needs homeFileId.
+  assert.throws(() => buildIosWallpaperPayload({ position: 2, lockFileId: "123" }));
+  // Position 4 = different per screen; needs BOTH.
+  assert.throws(() => buildIosWallpaperPayload({ position: 4, homeFileId: "123" }));
+  // Invalid position.
+  assert.throws(() => buildIosWallpaperPayload({ position: 7 as 1, homeFileId: "123" }));
+  // Non-numeric file id.
+  assert.throws(() => buildIosWallpaperPayload({ position: 1, lockFileId: "nope" }));
+});

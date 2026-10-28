@@ -12,6 +12,7 @@ export const PAYLOAD = {
     passcode: "androidpasscodepolicy",
     frp: "androidefrppolicy",
     wifi: "androidwifipolicy",
+    wallpaper: "androidwallpaperpolicy",
   },
   ios: {
     restrictions: "restrictionspolicy",
@@ -25,6 +26,7 @@ export const PAYLOAD = {
     email: "emailpolicy",
     proxy: "globalhttpproxypolicy",
     lockscreen_message: "ioslockscreenmessage",
+    wallpaper: "ioswallpaperpolicy",
   },
 } as const;
 
@@ -39,6 +41,7 @@ export type Purpose =
   | "email"
   | "proxy"
   | "lockscreen_message"
+  | "wallpaper"
   | "custom"
   | "apps"
   | "app_blacklist";
@@ -864,6 +867,79 @@ export function buildIosLockscreenMessagePayload(input: {
       offset_position: m.offsetPosition ?? 35,
     })),
   };
+}
+
+/**
+ * iOS wallpaper policy. Pushes an uploaded image (fileID from /emsapi/files)
+ * to the lock screen, home screen, or both.
+ *
+ * position: 1 = lock screen only, 2 = home screen only, 3 = same image for
+ * both, 4 = different images for each. Zoho accepts the fileID as a quoted
+ * string (confirmed live), which sidesteps the 18-digit precision problem
+ * that would otherwise lose the last 2-3 digits of the id.
+ *
+ * iOS reject code to watch for: PAY0014 "upload the image in RGB format" —
+ * grayscale PNGs are refused by Zoho's handler even though the shape is fine.
+ */
+export type IosWallpaperPosition = 1 | 2 | 3 | 4;
+export function buildIosWallpaperPayload(input: {
+  position: IosWallpaperPosition;
+  homeFileId?: string;      // required for position 2, 3, 4
+  lockFileId?: string;      // required for position 1, 4
+  allowChange?: boolean;    // let the user override wallpaper from Settings
+}) {
+  if (![1, 2, 3, 4].includes(input.position)) fail("VALIDATION_FAILED", "position must be 1, 2, 3, or 4");
+  const needsHome = input.position === 2 || input.position === 3 || input.position === 4;
+  const needsLock = input.position === 1 || input.position === 3 || input.position === 4;
+  // Position 3 fans the same image to both screens — if lock isn't given, borrow home.
+  const homeFileId = needsHome ? input.homeFileId : undefined;
+  const lockFileId = needsLock ? input.lockFileId ?? (input.position === 3 ? input.homeFileId : undefined) : undefined;
+  if (needsHome && !homeFileId) fail("VALIDATION_FAILED", "Upload a home screen image for this position");
+  if (needsLock && !lockFileId) fail("VALIDATION_FAILED", "Upload a lock screen image for this position");
+  for (const id of [homeFileId, lockFileId].filter(Boolean) as string[]) {
+    if (!/^\d+$/.test(id)) fail("VALIDATION_FAILED", `Invalid file ID '${id}' — must be the Zoho fileID`);
+  }
+
+  const body: Record<string, unknown> = { set_wallpaper_position: input.position };
+  if (homeFileId) {
+    body.below_hdpi_wallpaper = homeFileId;        // fileID as string — preserves 18-digit precision
+    body.is_below_hdpi_wall_modified = true;
+  }
+  if (lockFileId) {
+    body.below_hdpi_lock_wallpaper = lockFileId;
+    body.is_below_hdpi_lock_wall_modified = true;
+  }
+  if (input.allowChange !== undefined) body.allow_wallpaper_change = input.allowChange;
+  return body;
+}
+
+/**
+ * Android wallpaper policy. Pushes an uploaded image (fileID from /emsapi/files)
+ * as the device wallpaper. The guide splits "below_hdpi" (low-density) and
+ * "above_hdpi" (high-density) — admins typically send the same image for
+ * both; `highDpiFileId` is optional and defaults to `fileId`.
+ */
+export function buildAndroidWallpaperPayload(input: {
+  fileId: string;             // Zoho fileID from /emsapi/files
+  highDpiFileId?: string;     // optional separate image for high-density screens; defaults to fileId
+  allowChange?: boolean;
+  position?: 1 | 2 | 3;       // 1 center, 2 stretch, 3 tile (per Zoho enum)
+}) {
+  if (!/^\d+$/.test(input.fileId)) fail("VALIDATION_FAILED", `Invalid file ID '${input.fileId}' — must be the Zoho fileID`);
+  const highDpi = input.highDpiFileId ?? input.fileId;
+  if (!/^\d+$/.test(highDpi)) fail("VALIDATION_FAILED", `Invalid high-DPI file ID '${highDpi}'`);
+  const position = input.position ?? 3;
+  if (![1, 2, 3].includes(position)) fail("VALIDATION_FAILED", "position must be 1 (center), 2 (stretch), or 3 (tile)");
+
+  const body: Record<string, unknown> = {
+    below_hdpi_wallpaper: input.fileId,            // fileID as string — preserves 18-digit precision
+    above_hdpi_wallpaper: highDpi,
+    is_below_hdpi_wall_modified: true,
+    is_above_hdpi_wall_modified: true,
+    set_wallpaper_position: position,
+  };
+  if (input.allowChange !== undefined) body.allow_wallpaper_change = input.allowChange;
+  return body;
 }
 
 export function payloadNameFor(platform: "android" | "ios", purpose: Purpose): string | null {
