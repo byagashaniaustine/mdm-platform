@@ -54,6 +54,22 @@ Deno.test("kiosk payload encodes allowed_apps as a JSON array of {app_id, group_
   assert.throws(() => buildKioskPayload({ mode: "single", apps: [{ appId: "1", packageName: "bad name!" }] }));
 });
 
+Deno.test("kiosk payload preserves 18-digit app_group_id precision (string, not Number)", () => {
+  // Zoho app_group_ids like 247008000000159173 exceed Number.MAX_SAFE_INTEGER.
+  // Number(…) rounds the last 1-2 digits (→ 247008000000159170), and Zoho then
+  // returns 404 "Unknown id(s)". The wire payload must preserve the exact digits.
+  const id = "247008000000159173";
+  const p = buildKioskPayload({ mode: "single", apps: [{ appId: id, packageName: "com.google.android.dialer" }] });
+  // Assert the raw JSON STRING contains the exact digits, not Number(id).
+  assert.ok((p.allowed_apps as string).includes(`"app_id":${id}`), `expected exact digits "${id}" in ${p.allowed_apps}`);
+  assert.ok(!(p.allowed_apps as string).includes("247008000000159170"), "precision was lost — Number() rounded the id");
+});
+
+Deno.test("kiosk payload rejects non-numeric app ids (synthetic installed-/common-/manual-)", () => {
+  assert.throws(() => buildKioskPayload({ mode: "single", apps: [{ appId: "installed-com.foo", packageName: "com.foo" }] }));
+  assert.throws(() => buildKioskPayload({ mode: "single", apps: [{ appId: "manual-123-1", packageName: "com.foo" }] }));
+});
+
 Deno.test("kiosk payload fills every Zoho field with sensible defaults", () => {
   const p = buildKioskPayload({ mode: "single", apps: [{ appId: "1", packageName: "com.a.b" }] });
   // Launcher at top level

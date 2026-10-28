@@ -402,10 +402,18 @@ export function buildKioskPayload(input: {
   // is a JSON ARRAY of {app_id, group_display_name}. The dev guide's object-keyed
   // shape with SHOW_APP_ICON/APP_GROUP_ID/IDENTIFIER is Zoho's GET response, not
   // what POST accepts. app_id must be a real Zoho app_group_id (COM0008 otherwise).
-  const allowed = input.apps.map((a) => {
+  //
+  // Build the JSON string manually: Zoho app_group_ids are 18 digits
+  // (e.g. 247008000000159173), well past JS's safe-integer boundary
+  // (Number.MAX_SAFE_INTEGER = 9007199254740991, 16 digits). Number() rounds
+  // the last 1-2 digits — e.g. 247008000000159173 → 247008000000159170 — and
+  // Zoho returns 404 "Unknown id(s)". Preserving the digit string avoids this.
+  const esc = (s: string) => JSON.stringify(s);
+  for (const a of input.apps) {
     if (!/^[a-zA-Z][\w.]+$/.test(a.packageName)) fail("VALIDATION_FAILED", `Invalid package name ${a.packageName}`);
-    return { app_id: Number(a.appId), group_display_name: a.name ?? a.packageName };
-  });
+    if (!/^\d+$/.test(String(a.appId))) fail("VALIDATION_FAILED", `Android kiosk needs the numeric app_group_id from the Zoho app repo. '${a.appId}' isn't one.`);
+  }
+  const allowedApps = `[${input.apps.map((a) => `{"app_id":${String(a.appId)},"group_display_name":${esc(a.name ?? a.packageName)}}`).join(",")}]`;
 
   const launcherType = input.launcherType ?? 2;
   const screenOrientation = input.screenOrientation ?? 2;
@@ -425,7 +433,7 @@ export function buildKioskPayload(input: {
   // per the guide — they're IAM0018-rejected at the top level.
   return {
     kiosk_mode: input.mode === "single" ? 0 : 1, // 0 single app, 1 multi app
-    allowed_apps: JSON.stringify(allowed),
+    allowed_apps: allowedApps,
     launcher_type: launcherType,
     allow_status_bar: allowStatusBar,
     allow_status_bar_expansion: allowStatusBarExpansion,
