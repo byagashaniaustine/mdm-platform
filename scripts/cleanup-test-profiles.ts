@@ -10,56 +10,46 @@ import { toAppError } from "../backend/lib/errors.ts";
 const [eid] = Deno.args;
 if (!eid) { console.error("usage: cleanup-test-profiles.ts <enterpriseId>"); Deno.exit(2); }
 
-const TEST_PREFIXES = ["probe-", "mdm-probe-", "test-", "mdm-test-"];
+const TEST_PREFIXES = ["probe-", "mdm-probe-", "test-", "mdm-test-", "shape-probe-", "ct-probe-", "verify-", "fp-", "v-", "kiosk-real-"];
 
 const profiles = (await listProfiles(eid)) as { profile_id: string | number; profile_name?: string; is_moved_to_trash?: boolean }[];
 const tests = profiles.filter((p) => TEST_PREFIXES.some((pre) => (p.profile_name ?? "").startsWith(pre)));
 console.log(`${profiles.length} total profiles, ${tests.length} match test prefixes.`);
 if (!tests.length) { console.log("Nothing to clean."); Deno.exit(0); }
 
-const toTrash: string[] = [];
-const toPurge: string[] = [];
-// Zoho returns is_moved_to_trash as the string "true"/"false", not boolean.
-const trashed = (v: unknown) => v === true || v === "true";
-for (const p of tests) {
-  const id = String(p.profile_id);
-  if (trashed(p.is_moved_to_trash)) toPurge.push(id);
-  else toTrash.push(id);
-}
-console.log(`→ moving ${toTrash.length} to trash, permanently deleting ${toPurge.length} already in trash`);
-for (const name of tests) console.log(`  ${name.profile_id}  ${name.profile_name}  trash=${name.is_moved_to_trash}`);
+const all = tests.map((p) => String(p.profile_id));
+for (const t of tests) console.log(`  ${t.profile_id}  ${t.profile_name}`);
 
-// Delete one profile at a time: Zoho's DELETE /profiles seems to misreport
-// batch state. Deleting individually makes the trash → purge transition stick.
-async function delOne(id: string): Promise<"trashed" | "purged" | "error"> {
-  try { await deleteProfiles(eid, [id]); } catch (e) {
-    const msg = toAppError(e).message;
-    console.log(`  ❌ ${id}: ${msg.slice(0, 120)}`);
-    return "error";
-  }
-  return "trashed";
-}
-
+// Zoho's DELETE /profiles is two-pass: first call trashes, second purges.
+// Batched calls (≤10) actually move state; single-ID calls can silently
+// no-op the trash step. See scripts/delete-all-except-passcode.ts for the
+// same pattern.
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const DELAY_MS = 1200;
+const BATCH = 10;
+const DELAY_MS = 3000;
 
-const all = [...toTrash, ...toPurge];
-console.log(`\n→ Pass 1 — move each to trash (${all.length} profiles, ${DELAY_MS}ms between)`);
-let p1ok = 0;
-for (const id of all) {
-  if ((await delOne(id)) !== "error") p1ok++;
-  await sleep(DELAY_MS);
+async function pass(label: string): Promise<void> {
+  console.log(`\n== ${label} ==`);
+  for (let i = 0; i < all.length; i += BATCH) {
+    const chunk = all.slice(i, i + BATCH);
+    try {
+      await deleteProfiles(eid, chunk);
+      console.log(`  ✅ batch ${1 + i / BATCH}: ${chunk.length} ok`);
+    } catch (e) {
+      const err = toAppError(e);
+      // "already in trash" / "must be moved to trash" are harmless state mismatches between passes.
+      const soft = /moved to trash|COM0015|precondition|already/i.test(err.message);
+      console.log(`  ${soft ? "⚠️" : "❌"} batch ${1 + i / BATCH}: ${err.message.slice(0, 140)}`);
+    }
+    await sleep(DELAY_MS);
+  }
 }
-console.log(`Pass 1: ${p1ok}/${all.length} OK`);
 
-console.log("\n→ waiting 5s for Zoho state to settle…");
+await pass("Pass 1 — move to trash");
+console.log("\n→ waiting 5s for Zoho to settle…");
 await sleep(5000);
+await pass("Pass 2 — permanent delete");
 
-console.log("\n→ Pass 2 — permanent delete");
-let p2ok = 0;
-for (const id of all) {
-  if ((await delOne(id)) !== "error") p2ok++;
-  await sleep(DELAY_MS);
-}
-console.log(`Pass 2: ${p2ok}/${all.length} OK`);
-console.log("\nDone.");
+const final = (await listProfiles(eid)) as { profile_id: string | number; profile_name?: string }[];
+const stillTests = final.filter((p) => TEST_PREFIXES.some((pre) => (p.profile_name ?? "").startsWith(pre)));
+console.log(`\nFinal: ${final.length} profiles total, ${stillTests.length} test profiles remaining.`);

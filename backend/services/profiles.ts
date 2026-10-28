@@ -282,23 +282,29 @@ const op = (s: Session, action: string, profileId: string, params: Record<string
  * stays an accurate mirror of Zoho's state.
  */
 /**
- * iOS kiosk (`applockpolicy`) wants `app_group_id` from the per-release endpoint,
- * NOT the `app_id` returned by `GET /apps`. The frontend picker only knows the
- * top-level app_id, so we translate here. For each picked app:
+ * Both `applockpolicy` (iOS kiosk) and `androidkioskpolicy` want `app_group_id`
+ * from the per-release endpoint, NOT the `app_id` returned by `GET /apps`. The
+ * frontend picker only knows the top-level app_id, so we translate here. For
+ * each picked app:
  *   1. GET /apps/{app_id}             → read release_labels[0].release_label_id
  *   2. GET /apps/{app_id}/labels/{rl} → read app_group_id
- * Then feed app_group_id to `buildIosKioskPayload` as `appId`.
+ * Then feed app_group_id to the kiosk payload builder as `appId`.
  */
-async function resolveIosKioskAppIds(eid: string, config: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function resolveKioskAppIds(eid: string, config: Record<string, unknown>): Promise<Record<string, unknown>> {
   const apps = (config.apps ?? []) as { appId: string | number; displayName?: string; isSystemApp?: boolean }[];
   if (!apps.length) return config;
   const resolved = await Promise.all(apps.map(async (a) => {
+    // Frontend emits synthetic ids like "installed-com.foo" / "common-com.foo" / "manual-…"
+    // for apps that aren't in Zoho's repo. Those can't become a Zoho app_group_id.
+    if (typeof a.appId === "string" && /^(installed|common|manual)-/.test(a.appId)) {
+      fail("VALIDATION_FAILED", `App "${a.appId}" is not in Zoho's app repo. Upload it in the ME MDM console (Device Mgmt → Apps) and pick it from the repo list.`);
+    }
     const detail = await zoho.getAppDetail(eid, a.appId) as { release_labels?: { release_label_id?: string | number }[] };
     const releaseLabelId = detail.release_labels?.[0]?.release_label_id;
     if (!releaseLabelId) fail("ZOHO_BAD_REQUEST", `App ${a.appId} has no release labels — approve it in the Zoho console first.`);
     const labelDetail = await zoho.getAppLabelDetail(eid, a.appId, releaseLabelId) as { app_group_id?: string | number };
     const appGroupId = labelDetail.app_group_id;
-    if (!appGroupId) fail("ZOHO_BAD_REQUEST", `Zoho did not return an app_group_id for ${a.appId}; applockpolicy requires it.`);
+    if (!appGroupId) fail("ZOHO_BAD_REQUEST", `Zoho did not return an app_group_id for ${a.appId}; the kiosk payload requires it.`);
     return { ...a, appId: String(appGroupId) };
   }));
   return { ...config, apps: resolved };
@@ -311,9 +317,9 @@ export async function createProfile(s: Session, input: {
   purpose: Purpose;
   config: Record<string, unknown>;
 }, _idem: string | null) {
-  // Resolve iOS kiosk apps' app_group_id BEFORE building the payload.
-  const config = (input.platform === "ios" && input.purpose === "kiosk")
-    ? await resolveIosKioskAppIds(s.enterpriseId, input.config)
+  // Resolve kiosk apps' app_group_id BEFORE building the payload (iOS and Android both need it).
+  const config = input.purpose === "kiosk"
+    ? await resolveKioskAppIds(s.enterpriseId, input.config)
     : input.config;
   const payload = buildPayload(input.platform, input.purpose, config);
 
@@ -385,9 +391,9 @@ export async function createProfile(s: Session, input: {
 export async function addPolicy(s: Session, profileId: string, purpose: Purpose, config: Record<string, unknown>, idem: string | null) {
   const p = await getProfile(s.enterpriseId, profileId);
   if (p.state === "deleted") fail("CONFLICT", "Profile is deleted");
-  // Translate iOS kiosk's app_id → app_group_id before validation.
-  const resolved = (p.platform === "ios" && purpose === "kiosk")
-    ? await resolveIosKioskAppIds(s.enterpriseId, config)
+  // Translate kiosk's app_id → app_group_id before validation (iOS and Android both need it).
+  const resolved = purpose === "kiosk"
+    ? await resolveKioskAppIds(s.enterpriseId, config)
     : config;
   let payload;
   try {
