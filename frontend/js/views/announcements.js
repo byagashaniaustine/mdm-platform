@@ -8,14 +8,19 @@ export async function announcementsView(el, ctx) {
   const admin = ctx.can("admin");
   const newBtn = admin ? h("button", { class: "btn btn-primary", type: "button", onclick: () => compose(el, ctx) }, "New announcement") : null;
 
-  const render = (items) => clear(
-    el,
+  // Stable shell + content box so polling doesn't flicker the header/banner.
+  const contentBox = h("div");
+  clear(el,
     pageHeader("Announcements", "Messages shown on devices through the Zoho MDM app, with an optional acknowledgement button.", [newBtn]),
     h("div", { class: "banner banner-warn" }, h("div", {},
       h("strong", {}, "iPhone / iPad: "),
       "Announcements only appear inside the ",
       h("strong", {}, "ME MDM (Self Service) app"),
       ". Zoho reports success even when the app is missing — install it from the App Store and open it once so Apple Push can register, then re-send.")),
+    contentBox,
+  );
+
+  const renderContent = (items) => clear(contentBox,
     items.length
       ? h("div", { class: "cards" }, items.map((a) =>
         h("article", { class: "card" },
@@ -46,7 +51,16 @@ export async function announcementsView(el, ctx) {
       : emptyState("No announcements", "Send policy reminders, office notices or return-device requests to groups or single devices.", newBtn),
   );
 
-  const fetchAndRender = async () => { try { render(await get("/api/announcements")); } catch (_) {} };
+  let latest = null;
+  const equal = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  const fetchAndRender = async () => {
+    try {
+      const items = await get("/api/announcements");
+      if (equal(latest, items)) return;
+      latest = items;
+      renderContent(items);
+    } catch (_) {}
+  };
   await fetchAndRender();
   const timer = setInterval(() => {
     if (el.__viewToken !== mountToken) { clearInterval(timer); return; }

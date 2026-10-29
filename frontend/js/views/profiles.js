@@ -12,9 +12,10 @@ export async function profilesView(el, ctx) {
   const admin = ctx.can("admin");
   const newBtn = admin ? h("button", { class: "btn btn-primary", type: "button", onclick: () => profileWizard(el, ctx, catalog) }, icon("plus"), "New profile") : null;
 
-  const render = (profiles) => clear(
-    el,
-    pageHeader("Profiles", "One purpose per profile: restrictions, kiosk, passcode or factory-reset protection. Create it, publish it, then assign it to groups.", [newBtn]),
+  const contentBox = h("div");
+  clear(el, pageHeader("Profiles", "One purpose per profile: restrictions, kiosk, passcode or factory-reset protection. Create it, publish it, then assign it to groups.", [newBtn]), contentBox);
+
+  const renderContent = (profiles) => clear(contentBox,
     profiles.length
       ? h("section", { class: "card card-flush" }, h("div", { class: "table-wrap" }, responsive(h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Purpose"), h("th", {}, "State"), h("th", {}, "Groups"), h("th", {}, "Updated"), h("th", {}, ""))),
@@ -54,7 +55,16 @@ export async function profilesView(el, ctx) {
       : emptyState("No profiles yet", "Start with a Baseline – Security profile: restrictions + passcode.", newBtn),
   );
 
-  const fetchAndRender = async () => { try { render(await get("/api/profiles")); } catch (_) {} };
+  let latest = null;
+  const equal = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  const fetchAndRender = async () => {
+    try {
+      const profiles = await get("/api/profiles");
+      if (equal(latest, profiles)) return;
+      latest = profiles;
+      renderContent(profiles);
+    } catch (_) {}
+  };
   await fetchAndRender();
   const timer = setInterval(() => {
     if (el.__viewToken !== mountToken) { clearInterval(timer); return; }

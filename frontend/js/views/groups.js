@@ -17,14 +17,16 @@ const kindTone = (k) => (k === "function" ? "info" : k === "baseline" ? "ok" : "
 
 export async function groupsView(el, ctx) {
   clear(el, loading());
-  // Marker so the poll loop can tell when the user has navigated away.
   const mountToken = Symbol("groups-view");
   el.__viewToken = mountToken;
   const createBtn = ctx.can("admin") ? h("button", { class: "btn btn-primary", type: "button", onclick: () => createGroup(ctx) }, icon("plus"), "New group") : null;
 
-  const render = (groups) => clear(
-    el,
-    pageHeader("Groups", "Settings go to groups, not single devices. A profile assigned to a group reaches every device in it.", [createBtn]),
+  // Stable shell: header stays mounted. Only the content box is replaced on
+  // each poll — avoids flicker, preserves scroll position and hover state.
+  const contentBox = h("div");
+  clear(el, pageHeader("Groups", "Settings go to groups, not single devices. A profile assigned to a group reaches every device in it.", [createBtn]), contentBox);
+
+  const renderContent = (groups) => clear(contentBox,
     groups.length
       ? h("div", { class: "cards" }, groups.map((g) =>
         h("a", { class: "card group-card", href: `#/groups/${g.id}` },
@@ -36,14 +38,19 @@ export async function groupsView(el, ctx) {
       : h("section", { class: "card" }, emptyState("No groups yet", "Start with a baseline group for all corporate devices, then one group per department or function.", createBtn)),
   );
 
+  // Serialise so late responses can't overwrite newer ones.
+  let latest = null;
+  const equal = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
   const fetchAndRender = async () => {
-    try { render(await get("/api/groups")); } catch (_) { /* keep last render; next poll retries */ }
+    try {
+      const groups = await get("/api/groups");
+      if (equal(latest, groups)) return; // skip if nothing changed → no DOM touch at all
+      latest = groups;
+      renderContent(groups);
+    } catch (_) { /* keep last render; next poll retries */ }
   };
   await fetchAndRender();
 
-  // Poll every 10s. Stops as soon as this view is unmounted (user navigated
-  // away → render() replaced el's contents, dropping __viewToken) or when the
-  // tab is hidden (pause until it's visible again).
   const timer = setInterval(() => {
     if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
     if (document.hidden) return;

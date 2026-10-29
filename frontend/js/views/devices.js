@@ -158,16 +158,21 @@ export async function devicesView(el, ctx, params) {
   if (devices.length) draw();
 
   // Poll every 10s. Only updates the device data + redraws the table — leaves
-  // the toolbar inputs and selection untouched so UX state survives.
+  // the toolbar inputs and selection untouched so UX state survives. Skips the
+  // redraw entirely when the API response is byte-identical to the last one.
+  let lastSerialized = JSON.stringify(devices);
   const timer = setInterval(async () => {
     if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
     if (document.hidden) return;
     try {
       const latest = await get("/api/devices");
       const wasEmpty = devices.length === 0;
-      devices = latest;
       // Toggling between empty-state and populated requires a full re-mount.
       if (wasEmpty !== (latest.length === 0)) { clearInterval(timer); devicesView(el, ctx, params); return; }
+      const serialized = JSON.stringify(latest);
+      if (serialized === lastSerialized) return;
+      lastSerialized = serialized;
+      devices = latest;
       if (latest.length) draw();
     } catch (_) { /* keep last render; next tick retries */ }
   }, 10_000);
