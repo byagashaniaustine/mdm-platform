@@ -29,14 +29,16 @@ export interface LoanState {
 // Per-product thresholds. Spec §4.2 defaults; override in future by moving this
 // to automation_settings. k_soft = DPD at which the soft tier kicks in; L = DPD
 // at which the hard lock lands.
+// Operator decision (2026-10-29): lock at 72h past due uniformly across every
+// loan product. Diverges from spec §4.2 defaults of 5/8/15 — tighter and
+// product-agnostic. If this ever needs product-specific tuning, move the
+// thresholds to automation_settings.
 const THRESHOLDS: Record<number, { kSoft: number; L: number }> = {
-  1: { kSoft: 2, L: 5 },   // 7-Day
-  2: { kSoft: 2, L: 8 },   // 14-Day
-  3: { kSoft: 2, L: 15 },  // 28-Day
+  1: { kSoft: 2, L: 3 },   // 7-Day
+  2: { kSoft: 2, L: 3 },   // 14-Day
+  3: { kSoft: 2, L: 3 },   // 28-Day
 };
-// Fallback for an unknown product id — treat like the shortest term so a mis-
-// configured product can't accidentally extend the grace period.
-const DEFAULT_THRESHOLD = { kSoft: 2, L: 7 };
+const DEFAULT_THRESHOLD = { kSoft: 2, L: 3 };
 
 const MS_PER_DAY = 86_400_000;
 

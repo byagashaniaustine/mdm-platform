@@ -5,11 +5,41 @@
 import { Hono } from "hono";
 import { getConfig } from "../config.ts";
 import { log } from "../lib/log.ts";
-import { onLoanEvent } from "../services/bridge/automation.ts";
+import { onEvent, onLoanEvent, resolveLoanToEnterprise } from "../services/bridge/automation.ts";
+import type { FineractLoanSummary } from "../services/bridge/fineract.ts";
 
 const TIGHTENING_ACTIONS = new Set(["WRITEOFF", "REJECT"]);
 const RELEASE_ACTIONS   = new Set(["REPAYMENT", "CLOSE", "UNDOWRITEOFF"]);
 const DISBURSE_ACTIONS  = new Set(["DISBURSE", "DISBURSAL"]);
+const LOAN_STATUSES = new Set<FineractLoanSummary["status"]>([
+  "active", "closed", "written_off", "overpaid", "pending", "approved", "rejected", "unknown",
+]);
+
+/**
+ * Coerce a signed webhook body's optional `loan` field into FineractLoanSummary.
+ * The sender (LMS Simulator) owns the shape; we validate the status enum and
+ * default anything missing to safe values. Returns null if the field isn't
+ * usable as an override — the caller then falls back to the live Fineract fetch.
+ */
+function coerceLoanOverride(raw: unknown, loanId: string): FineractLoanSummary | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const status = String(r.status ?? "") as FineractLoanSummary["status"];
+  return {
+    loanId: String(r.loanId ?? loanId),
+    accountNo: String(r.accountNo ?? ""),
+    clientId: r.clientId == null ? null : String(r.clientId),
+    clientName: r.clientName == null ? null : String(r.clientName),
+    productId: Number(r.productId ?? 0),
+    productName: r.productName == null ? null : String(r.productName),
+    status: LOAN_STATUSES.has(status) ? status : "active",
+    externalId: r.externalId == null ? null : String(r.externalId),
+    disbursedOn: r.disbursedOn == null ? null : String(r.disbursedOn),
+    dueOn: r.dueOn == null ? null : String(r.dueOn),
+    dpd: Math.max(0, Number(r.dpd ?? 0) || 0),
+    totalOutstanding: Number(r.totalOutstanding ?? 0) || 0,
+  };
+}
 
 async function hmacHex(key: string, msg: string): Promise<string> {
   const enc = new TextEncoder();
@@ -67,14 +97,29 @@ export function fineractWebhookRoutes() {
       : RELEASE_ACTIONS.has(action) ? "release"
       : TIGHTENING_ACTIONS.has(action) ? "tighten"
       : "other";
-    log("info", "fineract.webhook_received", { entity, action, loan_id: loanId, kind });
+    // The caller may embed a pre-built FineractLoanSummary as `body.loan`. This
+    // is how the LMS Simulator drives dry-run reconciles without a real Fineract.
+    // Real Fineract webhooks never carry this field — they take the fetch path.
+    const override = coerceLoanOverride((body as Record<string, unknown>).loan, loanId);
+    const source = override ? "override" : "fineract";
+    log("info", "fineract.webhook_received", { entity, action, loan_id: loanId, kind, source });
     try {
-      const result = await onLoanEvent(loanId, trigger);
-      return c.json({ data: { trigger, kind, result } });
+      let result;
+      if (override) {
+        const resolved = await resolveLoanToEnterprise(loanId);
+        if (!resolved) {
+          log("info", "fineract.webhook_unlinked_override", { loan_id: loanId });
+          return c.json({ data: { trigger, kind, source, result: null, note: "no active loan_links row for this loanId" } });
+        }
+        result = await onEvent(resolved.enterpriseId, trigger, override);
+      } else {
+        result = await onLoanEvent(loanId, trigger);
+      }
+      return c.json({ data: { trigger, kind, source, result } });
     } catch (e) {
       // Still 200 so Fineract doesn't flood retries; the error is in our logs.
-      log("warn", "fineract.webhook_apply_failed", { loan_id: loanId, error: String(e) });
-      return c.json({ data: { trigger, kind, error: "processing_failed" } });
+      log("warn", "fineract.webhook_apply_failed", { loan_id: loanId, source, error: String(e) });
+      return c.json({ data: { trigger, kind, source, error: "processing_failed" } });
     }
   });
 

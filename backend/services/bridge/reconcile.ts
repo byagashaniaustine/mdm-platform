@@ -4,6 +4,7 @@
 // effects. See LOAN_DEVICE_AUTOMATION.md §10 and §19 (Phase 0 acceptance).
 import { db, run, runMaybe } from "../../lib/db.ts";
 import { log } from "../../lib/log.ts";
+import { applyBatch, type ApplyBatchResult } from "./apply.ts";
 import { getLoan, type FineractLoanSummary } from "./fineract.ts";
 import { listActive, type LoanLink } from "./link.ts";
 import { tierFor, type Tier } from "./tiers.ts";
@@ -37,6 +38,9 @@ export interface ReconcileBatchResult {
   held: boolean;
   holdReason?: string;
   decisions: DeviceDecision[];
+  // Populated when settings.enabled and reconcile wasn't held. In dry-run every
+  // decision reports skipped='dry_run' and no Zoho call fires.
+  applied?: ApplyBatchResult;
 }
 
 /** Load (or synthesise defaults for) the enterprise's automation settings row. */
@@ -185,19 +189,22 @@ export async function reconcileBatch(
     ? `${absExceeded ? `${changedCount}>${settings.max_changes_per_run} abs cap` : ""}${absExceeded && pctExceeded ? "; " : ""}${pctExceeded ? `${pct}%>${settings.max_pct_per_run}% pct cap` : ""}`
     : undefined;
 
+  let applied: ApplyBatchResult | undefined;
   if (!held) {
     // Persist desired_tier so webhooks later see a prev != new transition correctly.
-    // applied_tier intentionally untouched: Phase 0 never claims to have applied anything.
+    // apply.ts stamps applied_tier + current_group_id only on confirmed Zoho success.
     await upsertDesired(enterpriseId, decisions);
+    // Phase 2: actually push the moves. Internally no-ops in dry-run.
+    applied = await applyBatch(enterpriseId, decisions, settings);
   }
 
-  await writeRun(enterpriseId, trigger, decisions.length, held ? 0 : changedCount, held, holdReason, decisions);
+  await writeRun(enterpriseId, trigger, decisions.length, held ? 0 : changedCount, held, holdReason, decisions, applied);
   log(
     held ? "warn" : "info",
     held ? "automation.hold" : "automation.tick",
-    { enterprise_id: enterpriseId, trigger, considered: decisions.length, changed: changedCount, held, hold_reason: holdReason, dry_run: settings.dry_run },
+    { enterprise_id: enterpriseId, trigger, considered: decisions.length, changed: changedCount, held, hold_reason: holdReason, dry_run: settings.dry_run, moved: applied?.moved ?? 0, announced: applied?.announced ?? 0, apply_errors: applied?.errors ?? 0 },
   );
-  return { trigger, considered: decisions.length, changed: held ? 0 : changedCount, held, holdReason, decisions };
+  return { trigger, considered: decisions.length, changed: held ? 0 : changedCount, held, holdReason, decisions, applied };
 }
 
 async function upsertDesired(enterpriseId: string, decisions: DeviceDecision[]): Promise<void> {
@@ -213,7 +220,7 @@ async function upsertDesired(enterpriseId: string, decisions: DeviceDecision[]):
   await run(db().from("device_tier_state").upsert(rows, { onConflict: "enterprise_id,device_id" }));
 }
 
-async function writeRun(enterpriseId: string, trigger: string, considered: number, changed: number, held: boolean, holdReason: string | undefined, decisions: DeviceDecision[]): Promise<void> {
+async function writeRun(enterpriseId: string, trigger: string, considered: number, changed: number, held: boolean, holdReason: string | undefined, decisions: DeviceDecision[], applied?: ApplyBatchResult): Promise<void> {
   await run(db().from("automation_runs").insert({
     enterprise_id: enterpriseId,
     trigger,
@@ -228,6 +235,17 @@ async function writeRun(enterpriseId: string, trigger: string, considered: numbe
         device_id: d.deviceId, platform: d.platform, loan_id: d.loanId, product_id: d.productId,
         dpd: d.dpd, from: d.from, to: d.to, group: d.intendedGroupName, note: d.note,
       })),
+      applied: applied
+        ? {
+            attempted: applied.attempted, moved: applied.moved, announced: applied.announced,
+            errors: applied.errors, skipped: applied.skipped,
+            outcomes: applied.outcomes.map((o) => ({
+              device_id: o.deviceId, from: o.from, to: o.to, moved: o.moved, announced: o.announcementSent,
+              target_group: o.targetGroup, announcement: o.announcement,
+              skipped: o.skipped, error: o.error,
+            })),
+          }
+        : null,
     },
   }));
 }

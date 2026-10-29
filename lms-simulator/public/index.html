@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LMS Simulator · Loan → Device Tiers</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <div class="eyebrow">BLACK SWAN · MDM</div>
+      <h1>LMS Simulator</h1>
+      <p class="sub">Feed Fineract hooks &amp; timer ticks to push each phone through the six device tiers. Nothing here touches a real device.</p>
+    </div>
+    <div class="top-actions">
+      <span id="modePill" class="mode-pill mode-off" title="live mode requires SUPABASE + FINERACT_WEBHOOK_SECRET env">OFFLINE</span>
+      <select id="deviceSelect" class="device-select" title="real devices from Supabase (live mode only)"></select>
+      <button id="addLive" class="btn" title="add selected real device">+ Real device</button>
+      <button id="addAndroid" class="btn btn-ghost" title="add in-memory Android (no supabase)">+ Fake Android</button>
+      <button id="addIphone" class="btn btn-ghost" title="add in-memory iPhone (no supabase)">+ Fake iPhone</button>
+      <button id="resetAll" class="btn btn-ghost">Reset all</button>
+    </div>
+  </header>
+
+  <div class="ladder" id="ladder"></div>
+
+  <main class="layout">
+    <section id="phones" class="phones"></section>
+    <aside class="feed">
+      <h2>Signal feed</h2>
+      <p class="muted">What the LMS signalled the console to do, newest first.</p>
+      <div id="feed"></div>
+    </aside>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

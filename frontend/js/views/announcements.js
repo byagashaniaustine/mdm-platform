@@ -3,11 +3,12 @@ import { ago, clear, emptyState, field, h, input, jsonBlock, loading, modal, mul
 
 export async function announcementsView(el, ctx) {
   clear(el, loading());
-  const items = await get("/api/announcements");
+  const mountToken = Symbol("announcements-view");
+  el.__viewToken = mountToken;
   const admin = ctx.can("admin");
   const newBtn = admin ? h("button", { class: "btn btn-primary", type: "button", onclick: () => compose(el, ctx) }, "New announcement") : null;
 
-  clear(
+  const render = (items) => clear(
     el,
     pageHeader("Announcements", "Messages shown on devices through the Zoho MDM app, with an optional acknowledgement button.", [newBtn]),
     h("div", { class: "banner banner-warn" }, h("div", {},
@@ -29,7 +30,6 @@ export async function announcementsView(el, ctx) {
                 modal("Delivery status", jsonBlock(await get(`/api/announcements/${a.id}/status`)));
               } catch (err) {
                 toastError(err);
-                // Row is gone (deleted by someone else, or this tab's list is stale) — refresh.
                 if (err.code === "NOT_FOUND") announcementsView(el, ctx);
               }
             } }, "Delivery status"),
@@ -45,6 +45,14 @@ export async function announcementsView(el, ctx) {
         )))
       : emptyState("No announcements", "Send policy reminders, office notices or return-device requests to groups or single devices.", newBtn),
   );
+
+  const fetchAndRender = async () => { try { render(await get("/api/announcements")); } catch (_) {} };
+  await fetchAndRender();
+  const timer = setInterval(() => {
+    if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
+    if (document.hidden) return;
+    fetchAndRender();
+  }, 10_000);
 }
 
 function compose(el, ctx) {

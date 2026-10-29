@@ -17,10 +17,12 @@ const kindTone = (k) => (k === "function" ? "info" : k === "baseline" ? "ok" : "
 
 export async function groupsView(el, ctx) {
   clear(el, loading());
-  const groups = await get("/api/groups");
+  // Marker so the poll loop can tell when the user has navigated away.
+  const mountToken = Symbol("groups-view");
+  el.__viewToken = mountToken;
   const createBtn = ctx.can("admin") ? h("button", { class: "btn btn-primary", type: "button", onclick: () => createGroup(ctx) }, icon("plus"), "New group") : null;
 
-  clear(
+  const render = (groups) => clear(
     el,
     pageHeader("Groups", "Settings go to groups, not single devices. A profile assigned to a group reaches every device in it.", [createBtn]),
     groups.length
@@ -33,6 +35,20 @@ export async function groupsView(el, ctx) {
         )))
       : h("section", { class: "card" }, emptyState("No groups yet", "Start with a baseline group for all corporate devices, then one group per department or function.", createBtn)),
   );
+
+  const fetchAndRender = async () => {
+    try { render(await get("/api/groups")); } catch (_) { /* keep last render; next poll retries */ }
+  };
+  await fetchAndRender();
+
+  // Poll every 10s. Stops as soon as this view is unmounted (user navigated
+  // away → render() replaced el's contents, dropping __viewToken) or when the
+  // tab is hidden (pause until it's visible again).
+  const timer = setInterval(() => {
+    if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
+    if (document.hidden) return;
+    fetchAndRender();
+  }, 10_000);
 }
 
 function createGroup(ctx) {

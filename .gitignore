@@ -8,3 +8,6 @@ node_modules/
 # Zoho self-client credential dumps (contain client_secret / authorization code)
 backend/self_client*.json
 
+
+# local scratch db from one-off probes
+db.sqlite

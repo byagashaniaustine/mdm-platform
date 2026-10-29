@@ -63,7 +63,12 @@ const STATE_TEXT = { sent: "waiting for phone", acknowledged: "phone received it
 // ------------------------------------------------------------------ list
 export async function devicesView(el, ctx, params) {
   clear(el, loading());
-  const [devices, groups] = await Promise.all([get("/api/devices"), get("/api/groups")]);
+  const mountToken = Symbol("devices-view");
+  el.__viewToken = mountToken;
+  // devices is `let` so the poll can refresh it without re-rendering the toolbar
+  // (which would wipe the user's search text, filter choices, and selection).
+  // eslint-disable-next-line prefer-const
+  let [devices, groups] = await Promise.all([get("/api/devices"), get("/api/groups")]);
   const selected = new Set();
 
   const search = input({ type: "search", placeholder: "Name, model or user", "aria-label": "Search devices", value: params?.get("q") ?? "" });
@@ -151,6 +156,21 @@ export async function devicesView(el, ctx, params) {
       : h("section", { class: "card" }, emptyState("No devices yet", "Connect Zoho in Settings, enrol a device, then press Sync now.", h("a", { class: "btn btn-primary", href: "#/settings?tab=connection" }, "Go to connection settings"))),
   );
   if (devices.length) draw();
+
+  // Poll every 10s. Only updates the device data + redraws the table — leaves
+  // the toolbar inputs and selection untouched so UX state survives.
+  const timer = setInterval(async () => {
+    if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
+    if (document.hidden) return;
+    try {
+      const latest = await get("/api/devices");
+      const wasEmpty = devices.length === 0;
+      devices = latest;
+      // Toggling between empty-state and populated requires a full re-mount.
+      if (wasEmpty !== (latest.length === 0)) { clearInterval(timer); devicesView(el, ctx, params); return; }
+      if (latest.length) draw();
+    } catch (_) { /* keep last render; next tick retries */ }
+  }, 10_000);
 }
 
 // ------------------------------------------------------------------ detail page

@@ -6,11 +6,13 @@ let catalogCache = null;
 
 export async function profilesView(el, ctx) {
   clear(el, loading());
-  const [profiles, catalog] = await Promise.all([get("/api/profiles"), (catalogCache ??= get("/api/profiles/catalog"))]);
+  const mountToken = Symbol("profiles-view");
+  el.__viewToken = mountToken;
+  const catalog = await (catalogCache ??= get("/api/profiles/catalog"));
   const admin = ctx.can("admin");
   const newBtn = admin ? h("button", { class: "btn btn-primary", type: "button", onclick: () => profileWizard(el, ctx, catalog) }, icon("plus"), "New profile") : null;
 
-  clear(
+  const render = (profiles) => clear(
     el,
     pageHeader("Profiles", "One purpose per profile: restrictions, kiosk, passcode or factory-reset protection. Create it, publish it, then assign it to groups.", [newBtn]),
     profiles.length
@@ -34,9 +36,7 @@ export async function profilesView(el, ctx) {
                   try {
                     toastEvent(await post(`/api/profiles/${p.id}/publish`, {}), "Published");
                     profilesView(el, ctx);
-                  } catch (err) {
-                    toastError(err);
-                  }
+                  } catch (err) { toastError(err); }
                 },
               }, p.state === "modified" ? "Re-publish" : "Publish") : null,
               admin ? h("button", { class: "btn btn-sm", type: "button", onclick: () => profileWizard(el, ctx, catalog, p) }, "Add policy") : null,
@@ -53,6 +53,14 @@ export async function profilesView(el, ctx) {
       ))))
       : emptyState("No profiles yet", "Start with a Baseline – Security profile: restrictions + passcode.", newBtn),
   );
+
+  const fetchAndRender = async () => { try { render(await get("/api/profiles")); } catch (_) {} };
+  await fetchAndRender();
+  const timer = setInterval(() => {
+    if (el.__viewToken !== mountToken) { clearInterval(timer); return; }
+    if (document.hidden) return;
+    fetchAndRender();
+  }, 10_000);
 }
 
 /** Create a profile, or add a policy to an existing one (when `existing` is passed). */

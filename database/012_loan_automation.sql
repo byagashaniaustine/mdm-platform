@@ -93,3 +93,16 @@ insert into error_codes (code, http_status, message, retryable) values
   ('AUTOMATION_DISABLED',   412, 'Loan-driven automation is disabled for this enterprise.', false),
   ('AUTOMATION_HELD',       409, 'Automation batch exceeded blast-radius caps; held, nothing applied.', false)
 on conflict (code) do nothing;
+
+-- 7) RLS policies — service_role full access (project convention: backend uses service key).
+drop policy if exists loan_links_service_all          on loan_links;
+drop policy if exists tier_groups_service_all         on tier_groups;
+drop policy if exists device_tier_state_service_all   on device_tier_state;
+drop policy if exists automation_runs_service_all     on automation_runs;
+drop policy if exists automation_settings_service_all on automation_settings;
+
+create policy loan_links_service_all          on loan_links          for all to service_role using (true) with check (true);
+create policy tier_groups_service_all         on tier_groups         for all to service_role using (true) with check (true);
+create policy device_tier_state_service_all   on device_tier_state   for all to service_role using (true) with check (true);
+create policy automation_runs_service_all     on automation_runs     for all to service_role using (true) with check (true);
+create policy automation_settings_service_all on automation_settings for all to service_role using (true) with check (true);

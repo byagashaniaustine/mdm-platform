@@ -1,6 +1,6 @@
 // Pull Zoho state into Supabase. Zoho is the source of truth for device state;
 // our tables add business data (department/function kind, events, announcements).
-import { db, run } from "../lib/db.ts";
+import { db, run, runMaybe } from "../lib/db.ts";
 import { getConfig } from "../config.ts";
 import { fail, toAppError } from "../lib/errors.ts";
 import { acquireLease, releaseLease } from "../lib/lease.ts";
@@ -164,6 +164,41 @@ async function syncDevices(eid: string): Promise<number> {
     await onDevicesUnenrolled(eid, retireNow.map((d) => ({ id: d.id, device_name: d.device_name })));
   }
   return rows.length;
+}
+
+/**
+ * Re-sync one group's membership from Zoho — used by the automation apply path
+ * right after it moves a device, so our DB mirror never drifts from Zoho reality.
+ * Accepts the groups.id (our row id), not the zoho_group_id.
+ */
+export async function syncGroupMembership(eid: string, groupRowId: string): Promise<{ before: number; after: number }> {
+  const g = await runMaybe<{ id: string; zoho_group_id: string | null }>(
+    db().from("groups").select("id, zoho_group_id").eq("id", groupRowId).eq("enterprise_id", eid).maybeSingle(),
+  );
+  if (!g?.zoho_group_id) return { before: 0, after: 0 };
+
+  const devices = await run<{ id: string; zoho_device_id: number }[]>(
+    db().from("devices").select("id, zoho_device_id").eq("enterprise_id", eid),
+  );
+  const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
+
+  const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
+  const ids = members
+    .map((m) => {
+      const zohoId = typeof m === "string" || typeof m === "number"
+        ? String(m)
+        : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
+      return zohoId ? deviceByZoho.get(zohoId) : undefined;
+    })
+    .filter((x): x is string => !!x);
+
+  const before = (await run<{ device_id: string }[]>(db().from("group_devices").select("device_id").eq("group_id", groupRowId))).length;
+  await run(db().from("group_devices").delete().eq("group_id", groupRowId));
+  if (ids.length) {
+    await run(db().from("group_devices").insert(ids.map((device_id) => ({ group_id: groupRowId, device_id }))));
+  }
+  await run(db().from("groups").update({ member_count: ids.length }).eq("id", groupRowId));
+  return { before, after: ids.length };
 }
 
 async function syncGroups(eid: string): Promise<number> {

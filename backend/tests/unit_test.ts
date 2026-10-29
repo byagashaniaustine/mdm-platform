@@ -132,13 +132,15 @@ Deno.test("tierFor: truth table across products 1/2/3 for DPD -3 … +20", () =>
     return d.toISOString().slice(0, 10);
   };
   type Want = "disbursed" | "due_2d" | "overdue_2d" | "locked";
+  // Operator override (2026-10-29): L=3 (72h past due) uniformly across all
+  // three products. See services/bridge/tiers.ts THRESHOLDS.
   const expected: Record<number, Record<number, Want>> = {
-    // 7-Day: kSoft=2, L=5
-    1: { "-3": "disbursed", "-2": "due_2d", "-1": "due_2d", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 4: "overdue_2d", 5: "locked", 10: "locked", 20: "locked" },
-    // 14-Day: kSoft=2, L=8
-    2: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 7: "overdue_2d", 8: "locked", 20: "locked" },
-    // 28-Day: kSoft=2, L=15
-    3: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 14: "overdue_2d", 15: "locked", 20: "locked" },
+    // 7-Day: kSoft=2, L=3
+    1: { "-3": "disbursed", "-2": "due_2d", "-1": "due_2d", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 3: "locked", 5: "locked", 10: "locked", 20: "locked" },
+    // 14-Day: kSoft=2, L=3
+    2: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 3: "locked", 8: "locked", 20: "locked" },
+    // 28-Day: kSoft=2, L=3
+    3: { "-3": "disbursed", 0: "due_2d", 1: "overdue_2d", 2: "overdue_2d", 3: "locked", 15: "locked", 20: "locked" },
   };
   for (const productId of [1, 2, 3]) {
     for (const [key, want] of Object.entries(expected[productId])) {
