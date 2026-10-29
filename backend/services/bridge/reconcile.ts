@@ -52,8 +52,10 @@ export async function getSettings(enterpriseId: string): Promise<AutomationSetti
     enterprise_id: enterpriseId,
     enabled: false,
     dry_run: true,
-    max_changes_per_run: 25,
-    max_pct_per_run: 20,
+    // Prod defaults, matching database migration 014. Dev enterprises without
+    // a settings row inherit the fleet-ready caps too — safer than a surprise.
+    max_changes_per_run: 100,
+    max_pct_per_run: 50,
   };
 }
 

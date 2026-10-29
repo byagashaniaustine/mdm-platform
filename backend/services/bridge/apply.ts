@@ -102,135 +102,154 @@ export async function applyBatch(
   const groupNames = new Map<string, string>();
   for (const p of plan.values()) groupNames.set(p.targetGroupRowId, p.targetGroupName);
 
-  for (const d of decisions) {
-    const o: ApplyOutcome = { deviceId: d.deviceId, from: d.from, to: d.to, moved: false, announcementSent: false };
-    try {
-      if (!d.platform) { o.skipped = "no_platform"; skipped.no_platform++; outcomes.push(o); continue; }
-      if (!d.loanId)   { o.skipped = "no_loan_id";  skipped.no_loan_id++;  outcomes.push(o); continue; }
-      const tp = plan.get(`${d.to}:${d.platform}`);
-      if (!tp) { o.skipped = "no_mapping"; skipped.no_mapping++; outcomes.push(o); continue; }
-
-      o.targetGroup = tp.targetGroupName;
-      o.announcement = tp.announcementName;
-
-      // STEP B — Compute removals from Zoho-synced DB state. The device must leave
-      // every mapped tier group that isn't the target.
-      const memberships = await run<{ group_id: string }[]>(
-        db().from("group_devices")
-          .select("group_id")
-          .eq("device_id", d.deviceId)
-          .in("group_id", tierGroupRowIds),
-      );
-      const alreadyInTarget = memberships.some((m) => m.group_id === tp.targetGroupRowId);
-      const toRemove = memberships.filter((m) => m.group_id !== tp.targetGroupRowId).map((m) => m.group_id);
-
-      if (alreadyInTarget && !toRemove.length) {
-        o.skipped = "same_tier";
-        skipped.same_tier++;
-        await stampApplied(enterpriseId, d.deviceId, d.to, tp.targetGroupRowId, d.dpd);
+  // Process decisions in concurrent chunks of 4 — mirrors the pattern proven
+  // safe in sync.ts::syncGroups. Per-device contention is already serialised
+  // by events.idempotency_key, so cross-decision concurrency is fine.
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < decisions.length; i += BATCH_SIZE) {
+    const batch = decisions.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((d) => applyOneDecision(enterpriseId, d, plan, tierGroupRowIds, groupNames)),
+    );
+    for (let j = 0; j < results.length; j++) {
+      const r = results[j];
+      const d = batch[j];
+      if (r.status === "fulfilled") {
+        const o = r.value;
         outcomes.push(o);
-        continue;
-      }
-
-      const key = `auto:${d.loanId}:${d.to}`;
-
-      // STEP C — Enqueue remove(s). Each gets its own idempotency key so a
-      // single-device move leaves a clean per-group trail. The executor
-      // tolerates ZOHO_NOT_FOUND (already removed) gracefully.
-      for (const gid of toRemove) {
-        try {
-          await submitOperation({
-            enterpriseId,
-            category: "group",
-            action: "group.remove_device",
-            groupId: gid,
-            deviceId: d.deviceId,
-            params: { device_id: d.deviceId },
-            idempotencyKey: `${key}:rm:${gid}`,
-          });
-        } catch (e) {
-          const err = e as { code?: string };
-          if (err.code !== "ZOHO_NOT_FOUND") throw e; // already removed is fine
-        }
-      }
-
-      // STEP D — Enqueue add to target. The executor dedupes against Zoho's
-      // live membership, so it's safe even if Zoho already has us there.
-      if (!alreadyInTarget) {
-        await submitOperation({
-          enterpriseId,
-          category: "group",
-          action: "group.add_devices",
-          groupId: tp.targetGroupRowId,
-          params: { device_ids: [d.deviceId] },
-          idempotencyKey: `${key}:add`,
-        });
-      }
-
-      // STEP E — Post-sync affected groups from Zoho. This mirrors Zoho's
-      // actual (not acked) state back into our DB.
-      const affected = new Set<string>(toRemove);
-      affected.add(tp.targetGroupRowId);
-      for (const gid of affected) {
-        try { await syncGroupMembership(enterpriseId, gid); }
-        catch (e) { log("warn", "automation.apply_postsync_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) }); }
-      }
-
-      // STEP F — Verify. Read the device's actual membership from the post-synced DB.
-      const verifiedMemberships = await run<{ group_id: string }[]>(
-        db().from("group_devices")
-          .select("group_id")
-          .eq("device_id", d.deviceId)
-          .in("group_id", tierGroupRowIds),
-      );
-      const nowInTarget = verifiedMemberships.some((m) => m.group_id === tp.targetGroupRowId);
-      const stillStuckIn = verifiedMemberships.filter((m) => m.group_id !== tp.targetGroupRowId).map((m) => m.group_id);
-
-      if (!nowInTarget) {
-        o.error = { code: "APPLY_MOVE_NOT_VISIBLE", message: `Zoho acked the add to "${tp.targetGroupName}" but post-sync shows the device is not a member.` };
+        if (o.moved) moved++;
+        if (o.announcementSent) announced++;
+        if (o.skipped) skipped[o.skipped]++;
+        if (o.error) errors++;
+      } else {
+        // Promise.allSettled never rejects, but TS wants us to narrow.
         errors++;
+        const err = r.reason as { code?: string; message?: string };
+        const o: ApplyOutcome = {
+          deviceId: d.deviceId, from: d.from, to: d.to,
+          moved: false, announcementSent: false,
+          error: { code: err?.code ?? "APPLY_FAILED", message: err?.message ?? String(r.reason) },
+        };
         outcomes.push(o);
-        continue;
+        log("warn", "automation.apply_failed", { enterprise_id: enterpriseId, device_id: d.deviceId, to: d.to, error: o.error });
       }
-      if (stillStuckIn.length) {
-        // We ARE in the target but ALSO stuck in another tier group. Record it
-        // as a soft error so operators see it, but still mark moved=true since
-        // the primary intent (reach target) succeeded.
-        o.error = { code: "APPLY_DRIFT", message: `Device also still in: ${stillStuckIn.map((g) => groupNames.get(g) ?? g).join(", ")}` };
-      }
-
-      o.moved = true;
-      o.removedFrom = toRemove.map((g) => groupNames.get(g) ?? g);
-      moved++;
-
-      // STEP G — Fire tier-entry announcement to the specific device (not the
-      // group) so repeat-moves don't spam the whole group.
-      if (tp.announcementRowId) {
-        await submitOperation({
-          enterpriseId,
-          category: "announcement",
-          action: "announcement.send",
-          announcementId: tp.announcementRowId,
-          deviceId: d.deviceId,
-          params: { group_ids: [], device_ids: [d.deviceId] },
-          idempotencyKey: `${key}:ann`,
-        });
-        o.announcementSent = true;
-        announced++;
-      }
-
-      // STEP H — Stamp applied_tier only after verified success.
-      await stampApplied(enterpriseId, d.deviceId, d.to, tp.targetGroupRowId, d.dpd);
-    } catch (e) {
-      errors++;
-      const err = e as { code?: string; message?: string };
-      o.error = { code: err.code ?? "APPLY_FAILED", message: err.message ?? String(e) };
-      log("warn", "automation.apply_failed", { enterprise_id: enterpriseId, device_id: d.deviceId, to: d.to, error: o.error });
     }
-    outcomes.push(o);
   }
 
   return { attempted: decisions.length, moved, announced, skipped, errors, outcomes };
+}
+
+/**
+ * Single-device apply. Returns a fully-populated ApplyOutcome so the caller
+ * can merge batch tallies without mutating shared state. Never throws for
+ * expected skips (no_platform / no_loan_id / no_mapping / same_tier) — it
+ * returns an outcome with the right `skipped` field. Does throw for anything
+ * genuinely unexpected (Zoho error, DB error) — the batch loop catches it.
+ */
+async function applyOneDecision(
+  enterpriseId: string,
+  d: DeviceDecision,
+  plan: Awaited<ReturnType<typeof loadPlan>>,
+  tierGroupRowIds: string[],
+  groupNames: Map<string, string>,
+): Promise<ApplyOutcome> {
+  const o: ApplyOutcome = { deviceId: d.deviceId, from: d.from, to: d.to, moved: false, announcementSent: false };
+  if (!d.platform) { o.skipped = "no_platform"; return o; }
+  if (!d.loanId)   { o.skipped = "no_loan_id";  return o; }
+  const tp = plan.get(`${d.to}:${d.platform}`);
+  if (!tp) { o.skipped = "no_mapping"; return o; }
+
+  o.targetGroup = tp.targetGroupName;
+  o.announcement = tp.announcementName;
+
+  // STEP B — Compute removals from Zoho-synced DB state.
+  const memberships = await run<{ group_id: string }[]>(
+    db().from("group_devices").select("group_id").eq("device_id", d.deviceId).in("group_id", tierGroupRowIds),
+  );
+  const alreadyInTarget = memberships.some((m) => m.group_id === tp.targetGroupRowId);
+  const toRemove = memberships.filter((m) => m.group_id !== tp.targetGroupRowId).map((m) => m.group_id);
+
+  if (alreadyInTarget && !toRemove.length) {
+    o.skipped = "same_tier";
+    await stampApplied(enterpriseId, d.deviceId, d.to, tp.targetGroupRowId, d.dpd);
+    return o;
+  }
+
+  const key = `auto:${d.loanId}:${d.to}`;
+
+  // STEP C — Enqueue remove(s). The executor tolerates ZOHO_NOT_FOUND gracefully.
+  for (const gid of toRemove) {
+    try {
+      await submitOperation({
+        enterpriseId,
+        category: "group",
+        action: "group.remove_device",
+        groupId: gid,
+        deviceId: d.deviceId,
+        params: { device_id: d.deviceId },
+        idempotencyKey: `${key}:rm:${gid}`,
+      });
+    } catch (e) {
+      const err = e as { code?: string };
+      if (err.code !== "ZOHO_NOT_FOUND") throw e;
+    }
+  }
+
+  // STEP D — Enqueue add to target.
+  if (!alreadyInTarget) {
+    await submitOperation({
+      enterpriseId,
+      category: "group",
+      action: "group.add_devices",
+      groupId: tp.targetGroupRowId,
+      params: { device_ids: [d.deviceId] },
+      idempotencyKey: `${key}:add`,
+    });
+  }
+
+  // STEP E — Post-sync affected groups.
+  const affected = new Set<string>(toRemove);
+  affected.add(tp.targetGroupRowId);
+  for (const gid of affected) {
+    try { await syncGroupMembership(enterpriseId, gid); }
+    catch (e) { log("warn", "automation.apply_postsync_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) }); }
+  }
+
+  // STEP F — Verify against the post-synced DB.
+  const verifiedMemberships = await run<{ group_id: string }[]>(
+    db().from("group_devices").select("group_id").eq("device_id", d.deviceId).in("group_id", tierGroupRowIds),
+  );
+  const nowInTarget = verifiedMemberships.some((m) => m.group_id === tp.targetGroupRowId);
+  const stillStuckIn = verifiedMemberships.filter((m) => m.group_id !== tp.targetGroupRowId).map((m) => m.group_id);
+
+  if (!nowInTarget) {
+    o.error = { code: "APPLY_MOVE_NOT_VISIBLE", message: `Zoho acked the add to "${tp.targetGroupName}" but post-sync shows the device is not a member.` };
+    return o;
+  }
+  if (stillStuckIn.length) {
+    o.error = { code: "APPLY_DRIFT", message: `Device also still in: ${stillStuckIn.map((g) => groupNames.get(g) ?? g).join(", ")}` };
+  }
+
+  o.moved = true;
+  o.removedFrom = toRemove.map((g) => groupNames.get(g) ?? g);
+
+  // STEP G — Announcement to the specific device.
+  if (tp.announcementRowId) {
+    await submitOperation({
+      enterpriseId,
+      category: "announcement",
+      action: "announcement.send",
+      announcementId: tp.announcementRowId,
+      deviceId: d.deviceId,
+      params: { group_ids: [], device_ids: [d.deviceId] },
+      idempotencyKey: `${key}:ann`,
+    });
+    o.announcementSent = true;
+  }
+
+  // STEP H — Stamp applied_tier only after verified success.
+  await stampApplied(enterpriseId, d.deviceId, d.to, tp.targetGroupRowId, d.dpd);
+  return o;
 }
 
 /** Upsert device_tier_state.applied_tier + current_group_id after verified move. */

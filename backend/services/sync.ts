@@ -683,7 +683,13 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
         await db().from("sync_runs").update({ status: "failed", error: `${err.code}: ${err.message}`.slice(0, 500), finished_at: nowIso() })
           .eq("id", runId);
       }
-      log("warn", "sync.failed", { enterprise_id: eid, resource, code: err.code });
+      // Compliance 4xx on Zoho accounts without the feature is expected — the
+      // 24h skip above kicks in on the first failure, so this log fires at most
+      // once per day. Downgrade to info to avoid alarming operators.
+      // TODO: when Zoho confirms the right compliance endpoint, remove this
+      // special case entirely.
+      const level: "info" | "warn" = resource === "compliance" && (err.code === "ZOHO_BAD_REQUEST" || err.code === "ZOHO_NOT_FOUND") ? "info" : "warn";
+      log(level, "sync.failed", { enterprise_id: eid, resource, code: err.code });
       if (err.code === "ZOHO_NOT_CONNECTED" || err.code === "ZOHO_TOKEN_REFRESH_FAILED") break;
     }
   }

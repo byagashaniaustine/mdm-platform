@@ -13,6 +13,7 @@ import { associateProfiles } from "../services/groups.ts";
 import { publishProfile } from "../services/profiles.ts";
 import { syncGroupMembership } from "../services/sync.ts";
 import { submitOperation } from "../services/events.ts";
+import { breakerState } from "../lib/circuit.ts";
 import type { Tier } from "../services/bridge/tiers.ts";
 import type { DeviceDecision } from "../services/bridge/reconcile.ts";
 
@@ -253,6 +254,56 @@ export function automationRoutes() {
 
     const result = await applyBatch(eid, decisions, settings);
     return c.json({ data: result });
+  });
+
+  // GET /api/automation/health — rollup for the overview tile + ops dashboards.
+  // Cheap: pure DB aggregates plus the in-memory breaker state. Call it as often
+  // as the UI likes.
+  r.get("/health", async (c) => {
+    const eid = c.get("session").enterpriseId;
+    const settings = await getSettings(eid);
+    const breaker = breakerState("fineract");
+    const now = Date.now();
+
+    const [{ count: activeLinks }, { count: deadEvents24h }, lastRun, tierStates, openAlerts] = await Promise.all([
+      db().from("loan_links").select("id", { count: "exact", head: true }).eq("enterprise_id", eid).eq("status", "active"),
+      db().from("events").select("id", { count: "exact", head: true })
+        .eq("enterprise_id", eid).eq("state", "dead").in("category", ["group", "announcement"])
+        .gte("updated_at", new Date(now - 24 * 3600_000).toISOString()),
+      runMaybe<{ created_at: string }>(
+        db().from("automation_runs").select("created_at").eq("enterprise_id", eid).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      ),
+      run<{ desired_tier: string | null; applied_tier: string | null; updated_at: string }[]>(
+        db().from("device_tier_state").select("desired_tier, applied_tier, updated_at").eq("enterprise_id", eid).not("desired_tier", "is", null),
+      ),
+      run<{ rule_key: string; severity: string; title: string; created_at: string }[]>(
+        db().from("alerts").select("rule_key, severity, title, created_at").eq("enterprise_id", eid).like("rule_key", "automation.%").neq("status", "resolved").order("created_at", { ascending: false }).limit(20),
+      ),
+    ]);
+
+    const pending = tierStates.filter((s) => s.desired_tier && s.desired_tier !== s.applied_tier);
+    const under2h  = pending.filter((s) => now - Date.parse(s.updated_at) <= 2 * 3600_000).length;
+    const over2h   = pending.filter((s) => now - Date.parse(s.updated_at) > 2 * 3600_000 && now - Date.parse(s.updated_at) <= 24 * 3600_000).length;
+    const over24h  = pending.filter((s) => now - Date.parse(s.updated_at) > 24 * 3600_000).length;
+
+    return c.json({ data: {
+      enterprise_id: eid,
+      settings: {
+        enabled: settings.enabled,
+        dry_run: settings.dry_run,
+        max_changes_per_run: settings.max_changes_per_run,
+        max_pct_per_run: settings.max_pct_per_run,
+      },
+      fineract_breaker: breaker,
+      last_tick_at: lastRun?.created_at ?? null,
+      active_loan_links: activeLinks ?? 0,
+      devices_stuck: { under_2h: under2h, over_2h: over2h, over_24h: over24h },
+      events_dead_24h: deadEvents24h ?? 0,
+      open_alerts: openAlerts.map((a) => ({
+        rule_key: a.rule_key, severity: a.severity, title: a.title,
+        age_minutes: Math.round((now - Date.parse(a.created_at)) / 60_000),
+      })),
+    } });
   });
 
   // POST /api/automation/sweep — force the single-tier-group invariant on every

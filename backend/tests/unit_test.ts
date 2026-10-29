@@ -8,6 +8,7 @@ Deno.env.set("HASH_PEPPER", "unit-test-pepper");
 
 const { buildAndroidWallpaperPayload, buildIosWallpaperPayload, buildKioskPayload, buildPasscodePayload, buildRestrictionsPayload } = await import("../zoho/payloads.ts");
 const { tierFor } = await import("../services/bridge/tiers.ts");
+const { withBreaker, breakerState, _resetBreakers } = await import("../lib/circuit.ts");
 const { decryptSecret, encryptSecret, hmacHex, randomDigits } = await import("../lib/crypto.ts");
 const { toSafeHtml } = await import("../services/announcements.ts");
 const { backoffMs } = await import("../services/events.ts");
@@ -545,4 +546,42 @@ Deno.test("iOS wallpaper payload requires the right image per position", () => {
   assert.throws(() => buildIosWallpaperPayload({ position: 7 as 1, homeFileId: "123" }));
   // Non-numeric file id.
   assert.throws(() => buildIosWallpaperPayload({ position: 1, lockFileId: "nope" }));
+});
+
+Deno.test("circuit breaker: trips open after N consecutive failures and fails fast", async () => {
+  _resetBreakers();
+  const fail = () => Promise.reject(new Error("boom"));
+  let calls = 0;
+  const counting = () => { calls++; return fail(); };
+
+  // trip=3 → first 3 calls hit fn, each throws, 3rd one trips the breaker open.
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(() => withBreaker("test-trip", counting, { trip: 3, openMs: 10_000 }));
+  }
+  assert.equal(calls, 3);
+  assert.equal(breakerState("test-trip").state, "open");
+
+  // 4th call should fail WITHOUT hitting the fn (fast path).
+  await assert.rejects(() => withBreaker("test-trip", counting, { trip: 3, openMs: 10_000 }));
+  assert.equal(calls, 3, "fn should NOT have been called while breaker is open");
+});
+
+Deno.test("circuit breaker: half-open probe closes on success", async () => {
+  _resetBreakers();
+  const name = "test-halfopen";
+  // Force the breaker open via the private test-only reset path by exhausting
+  // the trip threshold with a quick synthetic fail.
+  const fail = () => Promise.reject(new Error("down"));
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(() => withBreaker(name, fail, { trip: 3, openMs: 1 }));
+  }
+  assert.equal(breakerState(name).state, "open");
+  // Wait past the openMs so the next call probes half_open.
+  await new Promise((r) => setTimeout(r, 5));
+  // Successful probe closes the breaker.
+  const result = await withBreaker(name, () => Promise.resolve("ok"), { trip: 3, openMs: 1 });
+  assert.equal(result, "ok");
+  const s = breakerState(name);
+  assert.equal(s.state, "closed");
+  assert.equal(s.consecutiveFailures, 0);
 });

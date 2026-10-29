@@ -13,7 +13,7 @@ import { withLease } from "./lib/lease.ts";
 import { claimDue, processEvent, updateEvent } from "./services/events.ts";
 import { pollCommandStatus } from "./services/commands.ts";
 import { syncEnterprise } from "./services/sync.ts";
-import { checkAdminActivity, getSettings } from "./services/monitoring.ts";
+import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
 import { pollEnterpriseLocations } from "./services/locations.ts";
 import "./services/groups.ts";
@@ -113,6 +113,7 @@ export async function monitoringTick(scanEveryMinutes: number) {
           await pollEnterpriseLocations(eid);
         }
         await checkAdminActivity(eid);
+        await scanAutomation(eid);
       });
     } catch (e) {
       log("warn", "worker.monitoring_failed", { enterprise_id: eid, code: toAppError(e).code });

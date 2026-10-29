@@ -5,13 +5,14 @@ const SEVERITY_TONE = { critical: "bad", warning: "warn", info: "info" };
 
 export async function overviewView(el, ctx) {
   clear(el, loading());
-  const [stats, zoho, events, alerts, groups, profiles] = await Promise.all([
+  const [stats, zoho, events, alerts, groups, profiles, automation] = await Promise.all([
     get("/api/overview"),
     get("/api/zoho/status"),
     get("/api/events?limit=8"),
     get("/api/alerts?status=active&limit=5").catch(() => []),
     get("/api/groups"),
     get("/api/profiles"),
+    get("/api/automation/health").then((r) => r.data).catch(() => null),
   ]);
 
   // Setup checklist: the order an admin actually needs to follow.
@@ -48,6 +49,27 @@ export async function overviewView(el, ctx) {
   const tile = (label, value, href, tone) =>
     h("a", { class: `tile ${tone ? `tile-${tone}` : ""}`, href }, h("span", { class: "tile-label" }, label), h("span", { class: "tile-value" }, String(value ?? 0)));
 
+  // Automation health tile — surfaces the three signals that need operator eyes:
+  // circuit breaker state, devices stuck > 24h, and open automation alerts.
+  const automationTile = (a) => {
+    const bk = a.fineract_breaker || {};
+    const stuck24 = a.devices_stuck?.over_24h ?? 0;
+    const stuck2  = a.devices_stuck?.over_2h ?? 0;
+    const openCount = (a.open_alerts ?? []).length;
+    const criticalOpen = (a.open_alerts ?? []).some((x) => x.severity === "critical");
+    const tone = bk.state !== "closed" || stuck24 > 0 || criticalOpen ? "bad"
+               : stuck2 > 0 || openCount > 0 ? "warn"
+               : a.active_loan_links > 0 ? "" : "";
+    const label = bk.state !== "closed" ? "Automation · FINERACT DOWN"
+                : stuck24 > 0            ? `Automation · ${stuck24} stuck 24h+`
+                : stuck2 > 0             ? `Automation · ${stuck2} pending`
+                : "Automation · healthy";
+    return h("a", { class: `tile ${tone ? `tile-${tone}` : ""}`, href: "#/alerts?category=automation", title: `${a.active_loan_links} active loan(s) · breaker ${bk.state}` },
+      h("span", { class: "tile-label" }, label),
+      h("span", { class: "tile-value" }, String(a.active_loan_links ?? 0)),
+    );
+  };
+
   clear(
     el,
     pageHeader("Overview", `${ctx.me.enterpriseName} · last sync with Zoho ${ago(stats.last_sync)}`),
@@ -65,6 +87,7 @@ export async function overviewView(el, ctx) {
       tile("Profiles", stats.profiles, "#/profiles"),
       tile("In progress", stats.pending_events, "#/activity", stats.pending_events ? "info" : ""),
       tile("Lost mode", stats.lost_mode, "#/devices?lost=1", stats.lost_mode ? "warn" : ""),
+      automation ? automationTile(automation) : null,
     ),
     h("div", { class: "split" },
       h("section", { class: "card" },

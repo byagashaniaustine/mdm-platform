@@ -33,6 +33,13 @@ export const RULES: Record<string, RuleDef> = {
   admin_failed_logins: { label: "Repeated failed sign-ins", description: "5+ wrong sign-in codes for this enterprise within 15 minutes.", severity: "warning", enabled: true, autoActions: [] },
   admin_new_ip: { label: "Sign-in from a new network", description: "An admin signed in from an IP address not seen in the last 30 days.", severity: "info", enabled: true, autoActions: [] },
   wipe_confirmation_failed: { label: "Wipe confirmation failed repeatedly", description: "A wipe/passcode request was cancelled after 5 wrong confirmations.", severity: "critical", enabled: true, autoActions: [] },
+  // Loan-automation health rules (added 2026-10-29, see plan). Each is raised by
+  // services/monitoring.ts::scanAutomation on every monitoringTick.
+  "automation.hold": { label: "Automation batch held", description: "A reconcile batch exceeded the blast-radius cap and was held with no device moved. Someone should look.", severity: "warning", enabled: true, autoActions: [] },
+  "automation.stuck_tier_warn": { label: "Device tier change pending", description: "A device has desired_tier ≠ applied_tier for more than 2 hours. Zoho may be slow or the device offline.", severity: "warning", enabled: true, autoActions: [] },
+  "automation.stuck_tier_crit": { label: "Device tier change stuck", description: "A device has desired_tier ≠ applied_tier for more than 24 hours. Apply path or Zoho is broken for this device.", severity: "critical", enabled: true, autoActions: [] },
+  "automation.events_dead": { label: "Automation events dead", description: "Group-move or announcement events hit max retries in the last 24h. Zoho or the executor is failing.", severity: "critical", enabled: true, autoActions: [] },
+  "automation.fineract_down": { label: "Fineract unreachable", description: "The circuit breaker is open after repeated Fineract failures. DPD-driven transitions will stall until Fineract recovers.", severity: "critical", enabled: true, autoActions: [] },
 };
 
 export type RuleKey = keyof typeof RULES;
@@ -315,6 +322,99 @@ export async function checkAdminActivity(eid: string, rules?: EffectiveRule[]) {
   const { count: hour } = await db().from("events").select("id", { count: "exact", head: true })
     .eq("enterprise_id", eid).eq("action", "login.failed").gte("action_time", since60);
   if ((hour ?? 0) === 0) await resolveAlert(eid, "admin_failed_logins", "No failed sign-ins for an hour");
+}
+
+/**
+ * Loan-automation health scan. Called from worker's monitoringTick (same lease
+ * as other scans). Raises/resolves alerts for five conditions. All queries are
+ * cheap aggregates; no Zoho or Fineract I/O here.
+ */
+export async function scanAutomation(eid: string, rules?: EffectiveRule[]): Promise<void> {
+  const r = rules ?? await getRules(eid);
+  const day = new Date().toISOString().slice(0, 10);
+
+  // 1) automation.hold — any held run in the last 1h.
+  const sinceHour = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { count: holdCount } = await db().from("automation_runs").select("id", { count: "exact", head: true })
+    .eq("enterprise_id", eid).eq("held", true).gte("created_at", sinceHour);
+  if ((holdCount ?? 0) > 0) {
+    await raiseAlert({
+      enterpriseId: eid, ruleKey: "automation.hold",
+      dedupeKey: `automation.hold:${eid}:${day}`,
+      title: `${holdCount} reconcile batch(es) held in the last hour`,
+      details: { count: holdCount, window_hours: 1 },
+    }, r);
+  } else {
+    await resolveAlert(eid, `automation.hold:${eid}:${day}`, "No held batches in the last hour");
+  }
+
+  // 2+3) stuck_tier: desired_tier != applied_tier for a while. One alert per tier
+  // group of staleness, device IDs listed in `details.devices`.
+  const stuckRows = await run<{ device_id: string; desired_tier: string | null; applied_tier: string | null; updated_at: string }[]>(
+    db().from("device_tier_state")
+      .select("device_id, desired_tier, applied_tier, updated_at")
+      .eq("enterprise_id", eid)
+      .not("desired_tier", "is", null),
+  );
+  const now = Date.now();
+  const stuckWarn = stuckRows.filter((s) => s.desired_tier !== s.applied_tier && now - Date.parse(s.updated_at) > 2 * 3600_000 && now - Date.parse(s.updated_at) <= 24 * 3600_000);
+  const stuckCrit = stuckRows.filter((s) => s.desired_tier !== s.applied_tier && now - Date.parse(s.updated_at) > 24 * 3600_000);
+
+  if (stuckWarn.length) {
+    await raiseAlert({
+      enterpriseId: eid, ruleKey: "automation.stuck_tier_warn",
+      dedupeKey: `automation.stuck_tier_warn:${eid}:${day}`,
+      title: `${stuckWarn.length} device(s) pending tier change >2h`,
+      details: { count: stuckWarn.length, devices: stuckWarn.slice(0, 20).map((s) => s.device_id) },
+    }, r);
+  } else {
+    await resolveAlert(eid, `automation.stuck_tier_warn:${eid}:${day}`, "No devices stuck >2h");
+  }
+
+  if (stuckCrit.length) {
+    await raiseAlert({
+      enterpriseId: eid, ruleKey: "automation.stuck_tier_crit",
+      dedupeKey: `automation.stuck_tier_crit:${eid}:${day}`,
+      title: `${stuckCrit.length} device(s) STUCK on tier change >24h`,
+      details: { count: stuckCrit.length, devices: stuckCrit.slice(0, 20).map((s) => s.device_id) },
+    }, r);
+  } else {
+    await resolveAlert(eid, `automation.stuck_tier_crit:${eid}:${day}`, "No devices stuck >24h");
+  }
+
+  // 4) events_dead — any automation-related event in `dead` state in last 24h.
+  const since24 = new Date(Date.now() - 24 * 3600_000).toISOString();
+  const { count: deadCount } = await db().from("events").select("id", { count: "exact", head: true })
+    .eq("enterprise_id", eid).eq("state", "dead").in("category", ["group", "announcement"]).gte("updated_at", since24);
+  if ((deadCount ?? 0) > 0) {
+    await raiseAlert({
+      enterpriseId: eid, ruleKey: "automation.events_dead",
+      dedupeKey: `automation.events_dead:${eid}:${day}`,
+      title: `${deadCount} dead automation event(s) in last 24h`,
+      details: { count: deadCount, window_hours: 24 },
+    }, r);
+  } else {
+    await resolveAlert(eid, `automation.events_dead:${eid}:${day}`, "No dead events in 24h");
+  }
+
+  // 5) fineract_down — circuit breaker state. Non-'closed' = alert.
+  const { breakerState } = await import("../lib/circuit.ts");
+  const breaker = breakerState("fineract");
+  if (breaker.state !== "closed") {
+    await raiseAlert({
+      enterpriseId: eid, ruleKey: "automation.fineract_down",
+      dedupeKey: `automation.fineract_down:${eid}`,
+      title: `Fineract circuit breaker ${breaker.state.toUpperCase()}`,
+      details: {
+        state: breaker.state,
+        consecutive_failures: breaker.consecutiveFailures,
+        opened_at: breaker.openedAt,
+        cooldown_remaining_ms: breaker.cooldownRemainingMs,
+      },
+    }, r);
+  } else {
+    await resolveAlert(eid, `automation.fineract_down:${eid}`, "Fineract reachable again");
+  }
 }
 
 /** Called after a successful login. */

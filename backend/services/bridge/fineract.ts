@@ -6,6 +6,7 @@
 // Credentials live in getConfig(); if fineractBaseUrl is empty, every call
 // throws FINERACT_UNCONFIGURED so the server can boot without Fineract set up.
 import { getConfig } from "../../config.ts";
+import { withBreaker } from "../../lib/circuit.ts";
 import { appError, fail, toAppError } from "../../lib/errors.ts";
 import { log } from "../../lib/log.ts";
 
@@ -130,47 +131,65 @@ function daysBetween(fromISO: string, toISO: string): number {
   return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000);
 }
 
+// All Fineract reads share one circuit breaker. UNCONFIGURED is a dev-time
+// state (no base URL set) and must NOT count against the trip threshold.
+// Everything else — unreachable host, 401, 404, 5xx — is a real signal that
+// Fineract is unhealthy right now.
+const BREAKER = "fineract";
+function isNetworkFailure(e: unknown): boolean {
+  return toAppError(e).code !== "FINERACT_UNCONFIGURED";
+}
+
 /** Full loan detail — status, repayment schedule, DPD, outstanding, externalId. */
 export async function getLoan(loanId: string, todayISO: string): Promise<FineractLoanSummary> {
-  const raw = await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?associations=repaymentSchedule,summary`);
-  const summary = (raw.summary ?? {}) as { totalOutstanding?: number };
-  const timeline = (raw.timeline ?? {}) as { actualDisbursementDate?: unknown };
-  return {
-    loanId: String(raw.id ?? loanId),
-    accountNo: String(raw.accountNo ?? ""),
-    clientId: raw.clientId != null ? String(raw.clientId) : null,
-    clientName: raw.clientName as string | null ?? null,
-    productId: Number(raw.loanProductId ?? 0),
-    productName: raw.loanProductName as string | null ?? null,
-    status: statusFrom(raw.status),
-    externalId: (raw.externalId as string | null) || null,
-    disbursedOn: arrToDate(timeline.actualDisbursementDate),
-    dueOn: nextDueFromSchedule(raw.repaymentSchedule),
-    dpd: dpdFromSchedule(raw.repaymentSchedule, todayISO),
-    totalOutstanding: Number(summary.totalOutstanding ?? 0),
-  };
+  return await withBreaker(BREAKER, async () => {
+    const raw = await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?associations=repaymentSchedule,summary`);
+    const summary = (raw.summary ?? {}) as { totalOutstanding?: number };
+    const timeline = (raw.timeline ?? {}) as { actualDisbursementDate?: unknown };
+    return {
+      loanId: String(raw.id ?? loanId),
+      accountNo: String(raw.accountNo ?? ""),
+      clientId: raw.clientId != null ? String(raw.clientId) : null,
+      clientName: raw.clientName as string | null ?? null,
+      productId: Number(raw.loanProductId ?? 0),
+      productName: raw.loanProductName as string | null ?? null,
+      status: statusFrom(raw.status),
+      externalId: (raw.externalId as string | null) || null,
+      disbursedOn: arrToDate(timeline.actualDisbursementDate),
+      dueOn: nextDueFromSchedule(raw.repaymentSchedule),
+      dpd: dpdFromSchedule(raw.repaymentSchedule, todayISO),
+      totalOutstanding: Number(summary.totalOutstanding ?? 0),
+    };
+  }, { countFailure: isNetworkFailure });
 }
 
 /** List loans — paginates via Fineract's offset/limit. Phase 0 reads all active. */
 export async function listLoans(opts: { active?: boolean; limit?: number } = {}): Promise<Array<{ id: string; status: FineractLoanSummary["status"]; externalId: string | null; productId: number }>> {
-  const limit = opts.limit ?? 200;
-  // GET /loans supports pagination; keep it simple — one page per call, Phase 0's
-  // dataset is tiny (3 loans). Grow this when the volume demands it.
-  const data = await req<{ pageItems?: Array<Record<string, unknown>>; totalFilteredRecords?: number }>(`/loans?limit=${limit}&offset=0`);
-  const items = data.pageItems ?? [];
-  const rows = items.map((it) => ({
-    id: String(it.id),
-    status: statusFrom(it.status),
-    externalId: (it.externalId as string | null) || null,
-    productId: Number(it.loanProductId ?? 0),
-  }));
-  return opts.active ? rows.filter((r) => r.status === "active") : rows;
+  return await withBreaker(BREAKER, async () => {
+    const limit = opts.limit ?? 200;
+    // GET /loans supports pagination; keep it simple — one page per call, Phase 0's
+    // dataset is tiny (3 loans). Grow this when the volume demands it.
+    const data = await req<{ pageItems?: Array<Record<string, unknown>>; totalFilteredRecords?: number }>(`/loans?limit=${limit}&offset=0`);
+    const items = data.pageItems ?? [];
+    const rows = items.map((it) => ({
+      id: String(it.id),
+      status: statusFrom(it.status),
+      externalId: (it.externalId as string | null) || null,
+      productId: Number(it.loanProductId ?? 0),
+    }));
+    return opts.active ? rows.filter((r) => r.status === "active") : rows;
+  }, { countFailure: isNetworkFailure });
 }
 
 /** Lookup by externalId (the device serial/IMEI stamped on the loan). */
 export async function loanByExternalId(externalId: string, todayISO: string): Promise<FineractLoanSummary | null> {
   try {
-    const raw = await req<Record<string, unknown>>(`/loans/external-id/${encodeURIComponent(externalId)}?associations=repaymentSchedule,summary`);
+    // Use the breaker on the lookup; getLoan() below is already wrapped so
+    // nested calls just see a closed breaker and pass through.
+    const raw = await withBreaker(BREAKER, () =>
+      req<Record<string, unknown>>(`/loans/external-id/${encodeURIComponent(externalId)}?associations=repaymentSchedule,summary`),
+      { countFailure: isNetworkFailure },
+    );
     return await getLoan(String(raw.id), todayISO);
   } catch (e) {
     if (toAppError(e).code === "FINERACT_NOT_FOUND") return null;

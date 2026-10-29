@@ -95,7 +95,9 @@ export function getConfig(): Config {
     fineractUsername: env("FINERACT_USERNAME", ""),
     fineractPassword: env("FINERACT_PASSWORD", ""),
     fineractWebhookSecret: env("FINERACT_WEBHOOK_SECRET", ""),
-    automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 60),
+    // 30 min keeps DPD-driven transitions within the same business hour as the
+    // DPD rollover; 60 was Phase 0's conservative default.
+    automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 30),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");
