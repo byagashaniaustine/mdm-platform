@@ -237,12 +237,19 @@ async function syncGroups(eid: string): Promise<number> {
   );
   const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
 
-  // Rebuild memberships, a few groups at a time to stay gentle on rate limits.
+  // Reconcile memberships, a few groups at a time to stay gentle on rate limits.
   // Each per-group block is serialized by `group_sync:<eid>:<groupId>` with the
-  // apply path's syncGroupMembership. If the apply path holds the lease (an
-  // in-flight tier move), skip this group's wipe for this cycle — next sync
-  // tick picks it up. Prevents the race where this wipe erases what apply's
-  // add_devices just wrote (surfaced as APPLY_MOVE_NOT_VISIBLE).
+  // apply path's syncGroupMembership — if apply is mid-move, we skip this cycle
+  // (next tick picks it up).
+  //
+  // ADD-ONLY. Zoho's listGroupMembers is eventually consistent: a tier group
+  // the apply path just populated can read back empty for several seconds, and
+  // a wipe-and-rewrite would then erase the just-written membership (surfaces
+  // downstream as APPLY_MOVE_NOT_VISIBLE and silent tier drift back to the
+  // device's home group on the next sync). We mirror the pattern already in
+  // use by syncGroupMembership (line 178 onward): add what Zoho shows that we
+  // don't yet have, never remove based on a single read. Explicit removals
+  // flow through the apply path's group.remove_device operations.
   for (let i = 0; i < saved.length; i += 4) {
     await Promise.all(saved.slice(i, i + 4).map(async (g) => {
       const rowId = g.id;
@@ -260,10 +267,20 @@ async function syncGroups(eid: string): Promise<number> {
             return zohoId ? deviceByZoho.get(zohoId) : undefined;
           })
           .filter((x): x is string => !!x);
-        await run(db().from("group_devices").delete().eq("group_id", rowId));
-        if (ids.length) await run(db().from("group_devices").insert(ids.map((device_id) => ({ group_id: rowId, device_id }))));
-        await db().from("groups").update({ member_count: ids.length }).eq("id", rowId);
-        return ids.length;
+        const currentIds = (await run<{ device_id: string }[]>(
+          db().from("group_devices").select("device_id").eq("group_id", rowId),
+        )).map((r) => r.device_id);
+        const currentSet = new Set(currentIds);
+        const toAdd = ids.filter((id) => !currentSet.has(id));
+        if (toAdd.length) {
+          await run(db().from("group_devices").insert(toAdd.map((device_id) => ({ group_id: rowId, device_id }))));
+        }
+        // DB truth after add-only reconcile: everything we had plus what Zoho
+        // showed. Prefer this over Zoho's raw count — Zoho may be under-
+        // reporting mid-propagation.
+        const effectiveCount = currentIds.length + toAdd.length;
+        await db().from("groups").update({ member_count: effectiveCount }).eq("id", rowId);
+        return effectiveCount;
       });
       if (didSync === null) {
         log("info", "sync.groups_skipped_apply_in_flight", { enterprise_id: eid, group_id: rowId });
