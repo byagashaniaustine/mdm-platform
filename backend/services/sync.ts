@@ -3,7 +3,7 @@
 import { db, run, runMaybe } from "../lib/db.ts";
 import { getConfig } from "../config.ts";
 import { fail, toAppError } from "../lib/errors.ts";
-import { acquireLease, releaseLease } from "../lib/lease.ts";
+import { acquireLease, releaseLease, withLease, withLeaseWait } from "../lib/lease.ts";
 import { log } from "../lib/log.ts";
 import * as zoho from "../zoho/api.ts";
 import { recordAudit } from "./events.ts";
@@ -170,44 +170,50 @@ async function syncDevices(eid: string): Promise<number> {
  * Re-sync one group's membership from Zoho — used by the automation apply path
  * right after it moves a device, so our DB mirror never drifts from Zoho reality.
  * Accepts the groups.id (our row id), not the zoho_group_id.
+ *
+ * Serialized via a per-group lease (`group_sync:<eid>:<groupRowId>`) so this
+ * can't race with the periodic syncGroups wipe-and-rewrite. If the periodic
+ * sync holds the lease, we wait up to 10s for it to release.
  */
 export async function syncGroupMembership(eid: string, groupRowId: string): Promise<{ before: number; after: number }> {
-  const g = await runMaybe<{ id: string; zoho_group_id: string | null }>(
-    db().from("groups").select("id, zoho_group_id").eq("id", groupRowId).eq("enterprise_id", eid).maybeSingle(),
-  );
-  if (!g?.zoho_group_id) return { before: 0, after: 0 };
+  return await withLeaseWait(`group_sync:${eid}:${groupRowId}`, 30, 10_000, async () => {
+    const g = await runMaybe<{ id: string; zoho_group_id: string | null }>(
+      db().from("groups").select("id, zoho_group_id").eq("id", groupRowId).eq("enterprise_id", eid).maybeSingle(),
+    );
+    if (!g?.zoho_group_id) return { before: 0, after: 0 };
 
-  const devices = await run<{ id: string; zoho_device_id: number }[]>(
-    db().from("devices").select("id, zoho_device_id").eq("enterprise_id", eid),
-  );
-  const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
+    const devices = await run<{ id: string; zoho_device_id: number }[]>(
+      db().from("devices").select("id, zoho_device_id").eq("enterprise_id", eid),
+    );
+    const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
 
-  const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
-  const ids = members
-    .map((m) => {
-      const zohoId = typeof m === "string" || typeof m === "number"
-        ? String(m)
-        : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
-      return zohoId ? deviceByZoho.get(zohoId) : undefined;
-    })
-    .filter((x): x is string => !!x);
+    const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
+    const ids = members
+      .map((m) => {
+        const zohoId = typeof m === "string" || typeof m === "number"
+          ? String(m)
+          : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
+        return zohoId ? deviceByZoho.get(zohoId) : undefined;
+      })
+      .filter((x): x is string => !!x);
 
-  // Add-only diff sync. Zoho's listGroupMembers is eventually consistent — a
-  // read right after an add can miss the just-added device, and a wipe-then-
-  // reinsert would erase what group.add_devices just wrote (surfaces as
-  // APPLY_MOVE_NOT_VISIBLE). Explicit removals go through group.remove_device.
-  // Out-of-band Zoho drift is reconciled by the periodic syncGroups cron.
-  const currentIds = (await run<{ device_id: string }[]>(
-    db().from("group_devices").select("device_id").eq("group_id", groupRowId),
-  )).map((r) => r.device_id);
-  const currentSet = new Set(currentIds);
-  const toAdd = ids.filter((x) => !currentSet.has(x));
-  if (toAdd.length) {
-    await run(db().from("group_devices").insert(toAdd.map((device_id) => ({ group_id: groupRowId, device_id }))));
-  }
-  const after = currentIds.length + toAdd.length;
-  await run(db().from("groups").update({ member_count: after }).eq("id", groupRowId));
-  return { before: currentIds.length, after };
+    // Add-only diff sync. Zoho's listGroupMembers is eventually consistent — a
+    // read right after an add can miss the just-added device, and a wipe-then-
+    // reinsert would erase what group.add_devices just wrote (surfaces as
+    // APPLY_MOVE_NOT_VISIBLE). Explicit removals go through group.remove_device.
+    // Out-of-band Zoho drift is reconciled by the periodic syncGroups cron.
+    const currentIds = (await run<{ device_id: string }[]>(
+      db().from("group_devices").select("device_id").eq("group_id", groupRowId),
+    )).map((r) => r.device_id);
+    const currentSet = new Set(currentIds);
+    const toAdd = ids.filter((x) => !currentSet.has(x));
+    if (toAdd.length) {
+      await run(db().from("group_devices").insert(toAdd.map((device_id) => ({ group_id: groupRowId, device_id }))));
+    }
+    const after = currentIds.length + toAdd.length;
+    await run(db().from("groups").update({ member_count: after }).eq("id", groupRowId));
+    return { before: currentIds.length, after };
+  });
 }
 
 async function syncGroups(eid: string): Promise<number> {
@@ -232,24 +238,36 @@ async function syncGroups(eid: string): Promise<number> {
   const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
 
   // Rebuild memberships, a few groups at a time to stay gentle on rate limits.
+  // Each per-group block is serialized by `group_sync:<eid>:<groupId>` with the
+  // apply path's syncGroupMembership. If the apply path holds the lease (an
+  // in-flight tier move), skip this group's wipe for this cycle — next sync
+  // tick picks it up. Prevents the race where this wipe erases what apply's
+  // add_devices just wrote (surfaced as APPLY_MOVE_NOT_VISIBLE).
   for (let i = 0; i < saved.length; i += 4) {
     await Promise.all(saved.slice(i, i + 4).map(async (g) => {
-      const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
-      // Zoho returns members two ways depending on endpoint quirks:
-      //   - flat array of id strings:  ["247008000000130084", ...]
-      //   - array of objects:          [{device_id: "...", ...}]
-      // Treat both; otherwise all memberships silently drop and member_count=0.
-      const ids = members
-        .map((m) => {
-          const zohoId = typeof m === "string" || typeof m === "number"
-            ? String(m)
-            : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
-          return zohoId ? deviceByZoho.get(zohoId) : undefined;
-        })
-        .filter((x): x is string => !!x);
-      await run(db().from("group_devices").delete().eq("group_id", g.id));
-      if (ids.length) await run(db().from("group_devices").insert(ids.map((device_id) => ({ group_id: g.id, device_id }))));
-      await db().from("groups").update({ member_count: ids.length }).eq("id", g.id);
+      const rowId = g.id;
+      const didSync = await withLease(`group_sync:${eid}:${rowId}`, 30, async () => {
+        const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
+        // Zoho returns members two ways depending on endpoint quirks:
+        //   - flat array of id strings:  ["247008000000130084", ...]
+        //   - array of objects:          [{device_id: "...", ...}]
+        // Treat both; otherwise all memberships silently drop and member_count=0.
+        const ids = members
+          .map((m) => {
+            const zohoId = typeof m === "string" || typeof m === "number"
+              ? String(m)
+              : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
+            return zohoId ? deviceByZoho.get(zohoId) : undefined;
+          })
+          .filter((x): x is string => !!x);
+        await run(db().from("group_devices").delete().eq("group_id", rowId));
+        if (ids.length) await run(db().from("group_devices").insert(ids.map((device_id) => ({ group_id: rowId, device_id }))));
+        await db().from("groups").update({ member_count: ids.length }).eq("id", rowId);
+        return ids.length;
+      });
+      if (didSync === null) {
+        log("info", "sync.groups_skipped_apply_in_flight", { enterprise_id: eid, group_id: rowId });
+      }
     }));
   }
 

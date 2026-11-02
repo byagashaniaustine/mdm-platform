@@ -62,3 +62,30 @@ export async function withLease<T>(name: string, ttlSeconds: number, fn: (renew:
     await releaseLease(name);
   }
 }
+
+/**
+ * Wait up to `timeoutMs` for the lease, then run fn under it. Unlike withLease
+ * which returns null when the lease is held, this one blocks (polling every
+ * ~250 ms) until it can acquire. If timeout expires without acquiring, runs fn
+ * anyway and logs — the caller gets to proceed rather than silently drop work.
+ * Use this when the work HAS to happen (e.g. the apply path's post-sync).
+ */
+export async function withLeaseWait<T>(name: string, ttlSeconds: number, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let acquired = await acquireLease(name, ttlSeconds);
+  while (!acquired && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    acquired = await acquireLease(name, ttlSeconds);
+  }
+  if (!acquired) {
+    // Rather than block indefinitely, proceed without the lease and log — the
+    // apply path's correctness is less important than its liveness.
+    log("warn", "lease.wait_timeout", { name, timeout_ms: timeoutMs });
+    return await fn();
+  }
+  try {
+    return await fn();
+  } finally {
+    await releaseLease(name);
+  }
+}
