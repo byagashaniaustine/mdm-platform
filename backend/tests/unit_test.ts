@@ -657,3 +657,18 @@ Deno.test("withLeaseWait: falls through with fn execution after timeout", async 
   assert.ok(elapsed >= 100, `should have waited at least the timeout; elapsed=${elapsed}ms`);
   assert.ok(elapsed < 350, `should NOT have waited the full holder duration; elapsed=${elapsed}ms`);
 });
+
+Deno.test("apply_queue module loads and exports the public surface", async () => {
+  // Smoke test for Level 2 (migration 016). The module touches the DB only
+  // inside the exported functions — importing it must not open a connection,
+  // so this unit test can safely verify the public surface without a live DB.
+  const mod = await import("../services/bridge/apply_queue.ts");
+  assert.equal(typeof mod.enqueueDecisions, "function");
+  assert.equal(typeof mod.claimApplyJobs, "function");
+  assert.equal(typeof mod.processApplyJob, "function");
+  assert.equal(typeof mod.drainApplyQueue, "function");
+  assert.equal(typeof mod.getApplyJob, "function");
+  // The route handler relies on getApplyJob returning null for a bogus id —
+  // we can't exercise that without DB; just assert the surface so a rename
+  // or signature break is caught at CI rather than first webhook.
+});

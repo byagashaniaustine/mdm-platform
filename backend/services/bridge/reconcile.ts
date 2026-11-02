@@ -5,6 +5,7 @@
 import { db, run, runMaybe } from "../../lib/db.ts";
 import { log } from "../../lib/log.ts";
 import { applyBatch, type ApplyBatchResult } from "./apply.ts";
+import { enqueueDecisions } from "./apply_queue.ts";
 import { getLoan, type FineractLoanSummary } from "./fineract.ts";
 import { listActive, type LoanLink } from "./link.ts";
 import { tierFor, type Tier } from "./tiers.ts";
@@ -31,6 +32,12 @@ export interface DeviceDecision {
   note?: string;            // link to spec: why this device was/wasn't counted as changed
 }
 
+export interface EnqueuedJob {
+  jobId: string;
+  deviceId: string;
+  loanId: string;
+}
+
 export interface ReconcileBatchResult {
   trigger: string;
   considered: number;
@@ -38,9 +45,11 @@ export interface ReconcileBatchResult {
   held: boolean;
   holdReason?: string;
   decisions: DeviceDecision[];
-  // Populated when settings.enabled and reconcile wasn't held. In dry-run every
-  // decision reports skipped='dry_run' and no Zoho call fires.
+  // Populated for the dry-run path OR when apply was invoked synchronously
+  // (legacy daily-tick calls). Webhook-driven reconciles populate `enqueued`
+  // instead and leave `applied` undefined — the worker drains the queue.
   applied?: ApplyBatchResult;
+  enqueued?: EnqueuedJob[];
 }
 
 /** Load (or synthesise defaults for) the enterprise's automation settings row. */
@@ -111,6 +120,7 @@ export async function reconcileBatch(
   todayISO: string,
   trigger: string,
   loansOverride?: FineractLoanSummary[],
+  opts: { syncApply?: boolean } = {},
 ): Promise<ReconcileBatchResult> {
   const settings = await getSettings(enterpriseId);
   if (!settings.enabled) {
@@ -192,21 +202,43 @@ export async function reconcileBatch(
     : undefined;
 
   let applied: ApplyBatchResult | undefined;
+  let enqueued: EnqueuedJob[] | undefined;
   if (!held) {
     // Persist desired_tier so webhooks later see a prev != new transition correctly.
-    // apply.ts stamps applied_tier + current_group_id only on confirmed Zoho success.
+    // apply.ts stamps applied_tier + current_group_id only on confirmed success.
     await upsertDesired(enterpriseId, decisions);
-    // Phase 2: actually push the moves. Internally no-ops in dry-run.
-    applied = await applyBatch(enterpriseId, decisions, settings);
+
+    if (settings.dry_run) {
+      // Dry-run never touches Zoho; keep the legacy applyBatch path so the
+      // response surfaces per-decision outcomes with skipped='dry_run'.
+      applied = await applyBatch(enterpriseId, decisions, settings);
+    } else if (opts.syncApply) {
+      // Daily tick and manual admin "apply now" still want to run inline so
+      // the caller can report real-time progress. Webhooks don't take this path.
+      applied = await applyBatch(enterpriseId, decisions, settings);
+    } else {
+      // Webhook path: enqueue the actionable decisions and return 202-shape
+      // data. Skipped decisions (no_platform / no_loan_id / no_mapping) aren't
+      // enqueued — nothing for the worker to do. same_tier is harder to tell
+      // without full apply.ts logic, so we enqueue them too; the worker will
+      // short-circuit on `same_tier` and complete the job cheaply.
+      const actionable = decisions.filter((d) => d.platform && d.loanId);
+      if (actionable.length) {
+        const inserted = await enqueueDecisions(enterpriseId, actionable, trigger);
+        enqueued = inserted.map((r) => ({ jobId: r.id, deviceId: r.device_id, loanId: r.loan_id }));
+      } else {
+        enqueued = [];
+      }
+    }
   }
 
   await writeRun(enterpriseId, trigger, decisions.length, held ? 0 : changedCount, held, holdReason, decisions, applied);
   log(
     held ? "warn" : "info",
     held ? "automation.hold" : "automation.tick",
-    { enterprise_id: enterpriseId, trigger, considered: decisions.length, changed: changedCount, held, hold_reason: holdReason, dry_run: settings.dry_run, moved: applied?.moved ?? 0, announced: applied?.announced ?? 0, apply_errors: applied?.errors ?? 0 },
+    { enterprise_id: enterpriseId, trigger, considered: decisions.length, changed: changedCount, held, hold_reason: holdReason, dry_run: settings.dry_run, moved: applied?.moved ?? 0, announced: applied?.announced ?? 0, apply_errors: applied?.errors ?? 0, enqueued: enqueued?.length ?? 0 },
   );
-  return { trigger, considered: decisions.length, changed: held ? 0 : changedCount, held, holdReason, decisions, applied };
+  return { trigger, considered: decisions.length, changed: held ? 0 : changedCount, held, holdReason, decisions, applied, enqueued };
 }
 
 async function upsertDesired(enterpriseId: string, decisions: DeviceDecision[]): Promise<void> {

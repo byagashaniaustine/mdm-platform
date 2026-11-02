@@ -145,8 +145,11 @@ export async function applyBatch(
  * expected skips (no_platform / no_loan_id / no_mapping / same_tier) — it
  * returns an outcome with the right `skipped` field. Does throw for anything
  * genuinely unexpected (Zoho error, DB error) — the batch loop catches it.
+ *
+ * Exported so apply_queue.ts can call it per-job without going through
+ * applyBatch's pre-sync (the queue version pre-syncs once per claim batch).
  */
-async function applyOneDecision(
+export async function applyOneDecision(
   enterpriseId: string,
   d: DeviceDecision,
   plan: Awaited<ReturnType<typeof loadPlan>>,

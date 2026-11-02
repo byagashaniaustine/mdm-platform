@@ -115,7 +115,10 @@ export function fineractWebhookRoutes() {
       } else {
         result = await onLoanEvent(loanId, trigger);
       }
-      return c.json({ data: { trigger, kind, source, result } });
+      // 202 Accepted when the apply work was queued; 200 when it ran inline
+      // (dry-run or no decisions) — the sim treats both equivalently.
+      const status = result?.enqueued?.length ? 202 : 200;
+      return c.json({ data: { trigger, kind, source, result } }, status);
     } catch (e) {
       // Still 200 so Fineract doesn't flood retries; the error is in our logs.
       log("warn", "fineract.webhook_apply_failed", { loan_id: loanId, source, error: String(e) });

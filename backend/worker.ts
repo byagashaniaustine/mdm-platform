@@ -14,6 +14,7 @@ import { claimDue, processEvent, updateEvent } from "./services/events.ts";
 import { pollCommandStatus } from "./services/commands.ts";
 import { syncEnterprise } from "./services/sync.ts";
 import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
+import { drainApplyQueue } from "./services/bridge/apply_queue.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
 import { pollEnterpriseLocations } from "./services/locations.ts";
 import "./services/groups.ts";
@@ -51,6 +52,16 @@ export async function tick(): Promise<void> {
       const [ev] = await claimDue(["requested"], 1);
       if (!ev) break;
       await processEvent(ev);
+    }
+
+    // Drain the async apply queue (migration 016). Webhooks enqueue tier-move
+    // jobs here; the worker runs them off the critical path so the webhook
+    // ingress stays fast and Zoho eventual-consistency doesn't block.
+    try {
+      const drained = await drainApplyQueue();
+      if (drained.processed) log("info", "apply_queue.drained", drained);
+    } catch (e) {
+      log("warn", "apply_queue.drain_failed", { error: String(e) });
     }
 
     for (let i = 0; i < 20; i++) {

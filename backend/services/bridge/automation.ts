@@ -33,11 +33,13 @@ export async function onEvent(
   });
 }
 
-/** Daily (or hourly) tick — reconcile every active loan_link in the enterprise. */
+/** Daily (or hourly) tick — reconcile every active loan_link in the enterprise.
+ *  Runs inline (syncApply) because the worker loop that invokes it is already
+ *  the "background" context — enqueuing would just push work to the next tick. */
 export async function dailyTick(enterpriseId: string): Promise<ReconcileBatchResult | null> {
   return await withLease(`automation:${enterpriseId}`, 300, async () => {
     const today = todayDarISO();
-    return await reconcileBatch(enterpriseId, today, "daily_tick");
+    return await reconcileBatch(enterpriseId, today, "daily_tick", undefined, { syncApply: true });
   });
 }
 
