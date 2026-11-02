@@ -23,9 +23,20 @@ import "./services/announcements.ts";
 import { dailyTickAll } from "./services/bridge/automation.ts";
 
 let ticking = false;
-let lastSync = 0;
-let lastPurge = 0;
-let lastAutomationTick = 0;
+
+// Durable debounce state (migration 015). Previously these were module-level
+// vars initialised to 0, which on Deno Deploy reset every cold start and
+// caused the "sync every ~60s" cascade. Reads happen once per key per tick;
+// writes only when the debounce window has actually elapsed.
+async function readTs(key: string): Promise<number> {
+  const { data } = await db().from("worker_state").select("value").eq("key", key).maybeSingle();
+  const v = (data?.value as { ts?: number } | null | undefined)?.ts;
+  return typeof v === "number" ? v : 0;
+}
+
+async function writeTs(key: string, ts: number): Promise<void> {
+  await db().from("worker_state").upsert({ key, value: { ts }, updated_at: new Date().toISOString() }, { onConflict: "key" });
+}
 
 export async function tick(): Promise<void> {
   if (ticking) return; // never overlap
@@ -65,8 +76,11 @@ export async function tick(): Promise<void> {
     }
 
     const cfg = getConfig();
-    if (Date.now() - lastSync > cfg.syncIntervalMinutes * 60_000) {
-      lastSync = Date.now();
+    const now = Date.now();
+
+    const lastSync = await readTs("last_sync_at");
+    if (now - lastSync > cfg.syncIntervalMinutes * 60_000) {
+      await writeTs("last_sync_at", now); // reserve the window before awaiting Zoho
       const conns = await run<{ enterprise_id: string }[]>(
         db().from("zoho_connections").select("enterprise_id").eq("status", "connected"),
       );
@@ -76,10 +90,9 @@ export async function tick(): Promise<void> {
     }
     await monitoringTick(cfg.syncIntervalMinutes);
 
-    // Loan-driven automation tick (dry-run in Phase 0). Honours per-enterprise
-    // automation_settings.enabled; enterprises without a row are skipped entirely.
-    if (Date.now() - lastAutomationTick > cfg.automationTickMinutes * 60_000) {
-      lastAutomationTick = Date.now();
+    const lastAutomationTick = await readTs("last_automation_tick");
+    if (now - lastAutomationTick > cfg.automationTickMinutes * 60_000) {
+      await writeTs("last_automation_tick", now);
       try {
         await dailyTickAll();
       } catch (e) {
@@ -119,8 +132,9 @@ export async function monitoringTick(scanEveryMinutes: number) {
       log("warn", "worker.monitoring_failed", { enterprise_id: eid, code: toAppError(e).code });
     }
   }
+  const lastPurge = await readTs("last_purge_at");
   if (Date.now() - lastPurge > 6 * 3600_000) {
-    lastPurge = Date.now();
+    await writeTs("last_purge_at", Date.now());
     const { data } = await db().rpc("purge_old_locations");
     if (data) log("info", "worker.locations_purged", { count: data });
   }

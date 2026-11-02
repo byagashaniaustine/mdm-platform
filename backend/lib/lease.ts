@@ -12,6 +12,12 @@ let leasesUnavailable = false;
 /** Leases held by this process: the DB lease can't tell two callers in the same process apart. */
 const heldHere = new Set<string>();
 
+/** Test-only: skip the DB round-trip and treat all leases as in-process-only. */
+export function _setLeasesUnavailable(v: boolean): void {
+  leasesUnavailable = v;
+  heldHere.clear();
+}
+
 /**
  * True when this process now holds the lease. Falls back to "yes" if migration 008 isn't applied yet.
  * renew=true extends a lease this caller already holds.

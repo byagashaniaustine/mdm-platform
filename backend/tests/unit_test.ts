@@ -9,6 +9,7 @@ Deno.env.set("HASH_PEPPER", "unit-test-pepper");
 const { buildAndroidWallpaperPayload, buildIosWallpaperPayload, buildKioskPayload, buildPasscodePayload, buildRestrictionsPayload } = await import("../zoho/payloads.ts");
 const { tierFor } = await import("../services/bridge/tiers.ts");
 const { withBreaker, breakerState, _resetBreakers } = await import("../lib/circuit.ts");
+const { withLease, withLeaseWait, _setLeasesUnavailable } = await import("../lib/lease.ts");
 const { decryptSecret, encryptSecret, hmacHex, randomDigits } = await import("../lib/crypto.ts");
 const { toSafeHtml } = await import("../services/announcements.ts");
 const { backoffMs } = await import("../services/events.ts");
@@ -584,4 +585,75 @@ Deno.test("circuit breaker: half-open probe closes on success", async () => {
   const s = breakerState(name);
   assert.equal(s.state, "closed");
   assert.equal(s.consecutiveFailures, 0);
+});
+
+Deno.test("withLease: returns null when another caller already holds it", async () => {
+  _setLeasesUnavailable(true); // skip DB; test in-process heldHere path only
+  let outerRan = false;
+  let innerRan = false;
+  const outer = await withLease("test-mutex-1", 10, async () => {
+    outerRan = true;
+    const inner = await withLease("test-mutex-1", 10, async () => {
+      innerRan = true;
+      return "unreachable";
+    });
+    return inner;
+  });
+  assert.equal(outerRan, true);
+  assert.equal(innerRan, false, "inner call must not run while outer holds the lease");
+  assert.equal(outer, null, "inner withLease returned null, so outer returned null too");
+});
+
+Deno.test("withLease: releases on throw so a retry can acquire", async () => {
+  _setLeasesUnavailable(true);
+  await assert.rejects(() => withLease("test-mutex-2", 10, async () => {
+    throw new Error("boom");
+  }));
+  // Second attempt must succeed — the throw must not leave the lease held.
+  let ran = false;
+  await withLease("test-mutex-2", 10, async () => { ran = true; });
+  assert.equal(ran, true, "second withLease after throw should acquire");
+});
+
+Deno.test("withLeaseWait: polls while held, then acquires + runs", async () => {
+  _setLeasesUnavailable(true);
+  let holderDone = false;
+  // Hold the lease for ~150 ms, then release.
+  const holder = withLease("test-wait-1", 10, async () => {
+    await new Promise((r) => setTimeout(r, 150));
+    holderDone = true;
+  });
+
+  // The waiter should block until the holder releases, then run.
+  await new Promise((r) => setTimeout(r, 10)); // let holder start first
+  const t0 = Date.now();
+  let waiterRan = false;
+  await withLeaseWait("test-wait-1", 10, 2000, async () => {
+    waiterRan = true;
+  });
+  const elapsed = Date.now() - t0;
+  await holder; // keep Deno happy
+
+  assert.equal(holderDone, true);
+  assert.equal(waiterRan, true);
+  assert.ok(elapsed >= 100, `waiter should have polled past holder release; elapsed=${elapsed}ms`);
+});
+
+Deno.test("withLeaseWait: falls through with fn execution after timeout", async () => {
+  _setLeasesUnavailable(true);
+  // Hold the lease the whole time; waiter times out and runs fn anyway.
+  const holder = withLease("test-wait-2", 10, async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  let ran = false;
+  const t0 = Date.now();
+  await withLeaseWait("test-wait-2", 10, 100, async () => { ran = true; });
+  const elapsed = Date.now() - t0;
+  await holder;
+
+  assert.equal(ran, true, "fn runs anyway after timeout (liveness over perfect serialization)");
+  assert.ok(elapsed >= 100, `should have waited at least the timeout; elapsed=${elapsed}ms`);
+  assert.ok(elapsed < 350, `should NOT have waited the full holder duration; elapsed=${elapsed}ms`);
 });
