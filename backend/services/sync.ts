@@ -183,36 +183,31 @@ export async function syncGroupMembership(eid: string, groupRowId: string): Prom
   const deviceByZoho = new Map(devices.map((d) => [String(d.zoho_device_id), d.id]));
 
   const members = await zoho.listGroupMembers(eid, g.zoho_group_id);
-  const rawZohoIds: string[] = [];
   const ids = members
     .map((m) => {
       const zohoId = typeof m === "string" || typeof m === "number"
         ? String(m)
         : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
-      if (zohoId) rawZohoIds.push(zohoId);
       return zohoId ? deviceByZoho.get(zohoId) : undefined;
     })
     .filter((x): x is string => !!x);
 
-  const before = (await run<{ device_id: string }[]>(db().from("group_devices").select("device_id").eq("group_id", groupRowId))).length;
-  // TEMP debug — diagnose APPLY_MOVE_NOT_VISIBLE. Remove once resolved.
-  log("info", "sync.debug_members", {
-    group_row_id: groupRowId,
-    zoho_group_id: g.zoho_group_id,
-    zoho_returned_count: members.length,
-    zoho_sample: members.slice(0, 3),
-    parsed_zoho_ids_sample: rawZohoIds.slice(0, 5),
-    local_devices_total: devices.length,
-    local_zoho_ids_sample: [...deviceByZoho.keys()].slice(0, 5),
-    mapped_local_ids_count: ids.length,
-    before_count: before,
-  });
-  await run(db().from("group_devices").delete().eq("group_id", groupRowId));
-  if (ids.length) {
-    await run(db().from("group_devices").insert(ids.map((device_id) => ({ group_id: groupRowId, device_id }))));
+  // Add-only diff sync. Zoho's listGroupMembers is eventually consistent — a
+  // read right after an add can miss the just-added device, and a wipe-then-
+  // reinsert would erase what group.add_devices just wrote (surfaces as
+  // APPLY_MOVE_NOT_VISIBLE). Explicit removals go through group.remove_device.
+  // Out-of-band Zoho drift is reconciled by the periodic syncGroups cron.
+  const currentIds = (await run<{ device_id: string }[]>(
+    db().from("group_devices").select("device_id").eq("group_id", groupRowId),
+  )).map((r) => r.device_id);
+  const currentSet = new Set(currentIds);
+  const toAdd = ids.filter((x) => !currentSet.has(x));
+  if (toAdd.length) {
+    await run(db().from("group_devices").insert(toAdd.map((device_id) => ({ group_id: groupRowId, device_id }))));
   }
-  await run(db().from("groups").update({ member_count: ids.length }).eq("id", groupRowId));
-  return { before, after: ids.length };
+  const after = currentIds.length + toAdd.length;
+  await run(db().from("groups").update({ member_count: after }).eq("id", groupRowId));
+  return { before: currentIds.length, after };
 }
 
 async function syncGroups(eid: string): Promise<number> {
