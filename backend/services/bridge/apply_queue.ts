@@ -135,27 +135,35 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
 
     const outcome = await applyOneDecision(job.enterprise_id, job.decision, plan, tierGroupRowIds, groupNames);
 
-    // Treat a soft error (verify-not-visible, drift) as still-pending if we
-    // have retries left. Zoho propagation usually finishes within one retry.
-    const hasHardError = Boolean(outcome.error && outcome.error.code === "APPLY_MOVE_NOT_VISIBLE" && job.attempts + 1 < job.max_attempts);
-    if (hasHardError) {
+    const nextAttempt = job.attempts + 1;
+    const hasError = Boolean(outcome.error);
+    const canRetry = hasError && outcome.error?.code === "APPLY_MOVE_NOT_VISIBLE" && nextAttempt < job.max_attempts;
+
+    // Soft error we can wait out — Zoho eventual consistency usually clears
+    // within one retry cycle.
+    if (canRetry) {
       await run(db().from("apply_jobs").update({
         state: "pending",
-        attempts: job.attempts + 1,
-        next_attempt_at: new Date(Date.now() + backoffMs(job.attempts + 1)).toISOString(),
+        attempts: nextAttempt,
+        next_attempt_at: new Date(Date.now() + backoffMs(nextAttempt)).toISOString(),
         locked_until: null,
         outcome: outcome as unknown as Record<string, unknown>,
         error_code: outcome.error?.code ?? null,
         error_message: outcome.error?.message ?? null,
         updated_at: nowIso,
       }).eq("id", job.id));
-      log("info", "apply_queue.will_retry", { job_id: job.id, attempts: job.attempts + 1, code: outcome.error?.code });
+      log("info", "apply_queue.will_retry", { job_id: job.id, attempts: nextAttempt, code: outcome.error?.code });
       return;
     }
 
+    // Terminal outcome. `applied` means Zoho confirmed the move (outcome.moved
+    // or outcome.skipped set). `dead` means we exhausted retries on a
+    // persistent error — this is NOT applied; downstream (alerts, UI) must
+    // treat it as a failure that needs operator attention.
+    const terminalState: JobState = hasError && !outcome.moved ? "dead" : "applied";
     await run(db().from("apply_jobs").update({
-      state: "applied",
-      attempts: job.attempts + 1,
+      state: terminalState,
+      attempts: nextAttempt,
       outcome: outcome as unknown as Record<string, unknown>,
       error_code: outcome.error?.code ?? null,
       error_message: outcome.error?.message ?? null,
@@ -163,7 +171,9 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
       updated_at: nowIso,
       locked_until: null,
     }).eq("id", job.id));
-    log("info", "apply_queue.applied", { job_id: job.id, moved: outcome.moved, announced: outcome.announcementSent });
+    log(terminalState === "dead" ? "warn" : "info", `apply_queue.${terminalState}`, {
+      job_id: job.id, moved: outcome.moved, announced: outcome.announcementSent, error_code: outcome.error?.code,
+    });
   } catch (e) {
     const err = e as { code?: string; message?: string };
     const nextAttempt = job.attempts + 1;

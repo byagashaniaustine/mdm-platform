@@ -8,11 +8,15 @@
 //   1. Zoho is source of truth. Pre-sync all tier groups from Zoho into DB
 //      before computing removes, so decisions are made against Zoho's reality
 //      rather than our possibly-stale mirror.
-//   2. Each device is in exactly ONE tier group at a time. Any membership in
-//      another mapped tier group gets removed before the add.
-//   3. Legacy / non-tier groups (ITdept, sales, etc.) are untouched.
+//   2. Each device is in exactly ONE tier group at a time (plus any admin
+//      "home" groups like ITdept/sales — those coexist and we never touch
+//      them). Zoho allows multi-group membership; the loan automation owns
+//      ONLY tier-group placement.
+//   3. Devices live permanently in some tier group — bootstrapped by the admin
+//      into Undisbursed before any loan. The automation moves them between
+//      tier groups and NEVER removes them from the tier-group set entirely.
 //   4. Post-move re-sync against Zoho; `applied_tier` is only stamped if the
-//      device is observed in the target group AFTER the sync.
+//      device is observed in the target tier group AFTER the sync.
 //   5. All work is idempotent via `events.idempotency_key = auto:<loan>:<tier>:<op>`.
 //
 // Guard order (short-circuits at the first match):
@@ -165,7 +169,10 @@ export async function applyOneDecision(
   o.targetGroup = tp.targetGroupName;
   o.announcement = tp.announcementName;
 
-  // STEP B — Compute removals from Zoho-synced DB state.
+  // STEP B — Compute removals from Zoho-synced DB state. Scope: tier groups
+  // ONLY. Home groups (ITdept, sales, …) coexist with tier membership and we
+  // never touch them. Devices live permanently in some tier group (Undisbursed
+  // by default, bootstrapped by the admin before any loan).
   const memberships = await run<{ group_id: string }[]>(
     db().from("group_devices").select("group_id").eq("device_id", d.deviceId).in("group_id", tierGroupRowIds),
   );
@@ -218,7 +225,8 @@ export async function applyOneDecision(
     catch (e) { log("warn", "automation.apply_postsync_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) }); }
   }
 
-  // STEP F — Verify against the post-synced DB.
+  // STEP F — Verify against the post-synced DB. Tier groups only (home-group
+  // membership is irrelevant to loan automation).
   const verifiedMemberships = await run<{ group_id: string }[]>(
     db().from("group_devices").select("group_id").eq("device_id", d.deviceId).in("group_id", tierGroupRowIds),
   );
