@@ -16,24 +16,41 @@ import type { FineractLoanSummary } from "../services/bridge/fineract.ts";
 // UNDOAPPROVAL) and purely-informational edits (UPDATE, ADJUSTTRANSACTION)
 // stay in "other" — the current loan state from getLoan() still drives the
 // real tier decision in reconcileBatch regardless of this hint.
+// Fineract CE 1.15 (istore build) action names — enumerated from the live
+// /permissions endpoint on 2026-11-03. Older-Fineract and Mifos-Community
+// aliases included as a safety net for other deployments. The kind is only a
+// log + response hint; reconcileBatch always drives the real tier decision
+// off the current loan state from getLoan(), so unknown actions still move
+// the device correctly.
 const DISBURSE_ACTIONS = new Set([
-  "DISBURSE",             // standard
-  "DISBURSAL",            // older Fineract alias
-  "DISBURSETOSAVINGS",    // disburse to a linked savings account
+  "DISBURSE",                            // standard
+  "DISBURSAL",                           // older Fineract alias
+  "DISBURSETOSAVINGS",                   // disburse to a linked savings account
+  "DISBURSEWITHOUTAUTODOWNPAYMENT",      // disburse but skip auto-downpayment logic
 ]);
 const RELEASE_ACTIONS = new Set([
-  "REPAYMENT",            // standard
-  "MAKEREPAYMENT",        // Mifos Community UI
-  "MAKEREPAYMENTS",       // bulk repayment
-  "RECOVERYPAYMENT",      // payment after writeoff
-  "CLOSE",                // loan closed
-  "CLOSEASRESCHEDULED",   // closed because rescheduled
-  "UNDOWRITEOFF",         // reversing a writeoff
+  "REPAYMENT",             // standard — Fineract CE 1.15 emits this
+  "MAKEREPAYMENT",         // Mifos Community UI (other builds)
+  "MAKEREPAYMENTS",        // bulk repayment (other builds)
+  "RECOVERYPAYMENT",       // payment after writeoff
+  "CLOSE",                 // loan closed
+  "CLOSEASRESCHEDULED",    // closed because rescheduled
+  "FORECLOSURE",           // borrower pays off early
+  "GOODWILLCREDIT",        // operator discretionary payment
+  "UNDOWRITEOFF",          // reversing a writeoff (loan is alive again, but device returned)
+  "UNDOCHARGEOFF",         // reversing a chargeoff
+  "CONTRACT_TERMINATION_UNDO", // reversing a contract termination
+  "CREDITBALANCEREFUND",   // overpayment refund — loan is settled
 ]);
 const TIGHTENING_ACTIONS = new Set([
-  "WRITEOFF",             // lender takes the loss
-  "REJECT",               // application rejected
-  "UNDODISBURSAL",        // reversing a disbursal → device back toward undisbursed
+  "WRITEOFF",              // lender takes the loss
+  "CHARGEOFF",             // alternative writeoff path on CE 1.15
+  "REJECT",                // application rejected (pre-disburse)
+  "SETFRAUD",              // fraud flagged — device should lock
+  "CONTRACT_TERMINATION",  // loan contract terminated
+  "UNDODISBURSAL",         // reversing a disbursal (word-order variant in some builds)
+  "DISBURSALUNDO",         // reversing a disbursal (CE 1.15 word order)
+  "DISBURSALLASTUNDO",     // reversing the last tranche of a multi-tranche disbursal
 ]);
 const LOAN_STATUSES = new Set<FineractLoanSummary["status"]>([
   "active", "closed", "written_off", "overpaid", "pending", "approved", "rejected", "unknown",
