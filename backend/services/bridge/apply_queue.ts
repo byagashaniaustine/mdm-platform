@@ -68,7 +68,27 @@ export async function enqueueDecisions(
   trigger: string,
 ): Promise<Array<{ id: string; device_id: string; loan_id: string }>> {
   if (!decisions.length) return [];
-  const rows = decisions.map((d) => ({
+
+  // Drop decisions targeting devices that have been removed from Zoho — any
+  // group.add_devices on them will succeed in POST but the device will never
+  // show up in GET /groups/{id}/members, cycling through APPLY_MOVE_NOT_VISIBLE
+  // retries until dead-letter. Correct behavior but wastes Zoho quota and
+  // dirties the queue; refuse at ingress instead. Protects us whether the
+  // event source is the sim today or Fineract tomorrow.
+  const deviceIds = [...new Set(decisions.map((d) => d.deviceId))];
+  const removed = await run<{ id: string }[]>(
+    db().from("devices").select("id").eq("enterprise_id", enterpriseId).eq("is_removed", true).in("id", deviceIds),
+  );
+  const removedSet = new Set(removed.map((r) => r.id));
+  const kept = decisions.filter((d) => !removedSet.has(d.deviceId));
+  if (removed.length) {
+    log("info", "apply_queue.dropped_removed_devices", {
+      enterprise_id: enterpriseId, trigger, dropped: removed.length, device_ids: removed.map((r) => r.id),
+    });
+  }
+  if (!kept.length) return [];
+
+  const rows = kept.map((d) => ({
     enterprise_id: enterpriseId,
     device_id: d.deviceId,
     loan_id: d.loanId,
@@ -142,6 +162,28 @@ export async function claimApplyJobs(limit = MAX_JOBS_PER_TICK): Promise<ApplyJo
  */
 export async function processApplyJob(job: ApplyJobRow): Promise<void> {
   const nowIso = new Date().toISOString();
+
+  // Pre-flight: if the device was removed from Zoho between enqueue and now,
+  // short-circuit to 'dead' instead of burning retries on APPLY_MOVE_NOT_VISIBLE.
+  // enqueueDecisions filters at ingress, but a device can be removed after a job
+  // is already queued — this covers that race.
+  const dev = await runMaybe<{ is_removed: boolean }>(
+    db().from("devices").select("is_removed").eq("id", job.device_id).maybeSingle(),
+  );
+  if (dev?.is_removed) {
+    await run(db().from("apply_jobs").update({
+      state: "dead",
+      error_code: "DEVICE_REMOVED",
+      error_message: "Device is marked is_removed=true in Zoho; refusing to apply.",
+      completed_at: nowIso,
+      updated_at: nowIso,
+      locked_until: null,
+    }).eq("id", job.id));
+    log("info", "apply_queue.skipped_removed_device", { job_id: job.id, device_id: job.device_id });
+    try { await stampObserved(job.enterprise_id, job.device_id); } catch { /* best effort */ }
+    return;
+  }
+
   try {
     // Fresh per-job pre-sync so the queue worker always acts on current
     // Zoho reality (not the webhook's stale moment).
