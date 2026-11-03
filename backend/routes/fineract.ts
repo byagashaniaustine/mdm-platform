@@ -85,8 +85,18 @@ export function fineractWebhookRoutes() {
   const r = new Hono();
 
   // POST /api/fineract/hooks — Fineract Web hook delivery.
-  // Fineract's config can carry extra headers; we expect `X-Fineract-Signature`
-  // containing the hex HMAC-SHA256 of the raw body under FINERACT_WEBHOOK_SECRET.
+  //
+  // Two accepted auth modes, so this works both with Fineract builds that
+  // HMAC-sign the body and with vanilla CE 1.x where the standard Web hook
+  // template just POSTs the payload with no header:
+  //   1. HMAC path: X-Fineract-Signature header carrying the hex HMAC-SHA256
+  //      of the raw body under FINERACT_WEBHOOK_SECRET. Preferred when the
+  //      Mifos build supports a signing extension.
+  //   2. URL-param path: a `?key=<FINERACT_WEBHOOK_SECRET>` query string on
+  //      the hook URL — the secret is URL-decoded by Hono. CE 1.x operators
+  //      configure the hook URL in Mifos as
+  //        https://.../api/fineract/hooks?key=<url-encoded-secret>
+  //      Compared constant-time; no header requirement.
   r.post("/hooks", async (c) => {
     const secret = getConfig().fineractWebhookSecret;
     if (!secret) {
@@ -95,10 +105,19 @@ export function fineractWebhookRoutes() {
     }
     const raw = await c.req.text();
     const sig = c.req.header("X-Fineract-Signature") ?? c.req.header("x-fineract-signature") ?? "";
-    const expected = await hmacHex(secret, raw);
-    if (!timingSafeEq(sig.toLowerCase(), expected)) {
-      log("warn", "fineract.webhook_bad_signature");
-      return c.json({ error: { code: "AUTH_REQUIRED", message: "Invalid signature." } }, 401);
+    const urlKey = c.req.query("key") ?? "";
+
+    let authed = false;
+    if (sig) {
+      const expected = await hmacHex(secret, raw);
+      authed = timingSafeEq(sig.toLowerCase(), expected);
+    }
+    if (!authed && urlKey) {
+      authed = timingSafeEq(urlKey, secret);
+    }
+    if (!authed) {
+      log("warn", "fineract.webhook_bad_auth", { had_sig: Boolean(sig), had_url_key: Boolean(urlKey) });
+      return c.json({ error: { code: "AUTH_REQUIRED", message: "No valid X-Fineract-Signature header or ?key=<secret> query param." } }, 401);
     }
     // Parse now that the signature is verified.
     let body: Record<string, unknown>;
