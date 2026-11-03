@@ -138,13 +138,40 @@ export async function upsertLoanLink(
   void nowIso;
 }
 
-/** Convenience for the webhook: fetch the loan once, enrich the link, then reconcile. */
-export async function onLoanEvent(fineractLoanId: string, trigger: string): Promise<ReconcileBatchResult | null> {
-  const resolved = await resolveLoanToEnterprise(fineractLoanId);
-  if (!resolved) {
-    log("info", "automation.unlinked_loan", { fineract_loan_id: fineractLoanId, trigger });
-    return null;
+/**
+ * Resolve a device by the externalId Fineract stamped on the loan. We accept:
+ *   1. exact serial_number match
+ *   2. "SIM-<serial>" prefix (sim convention) ↔ raw serial
+ *   3. imei match
+ * All variants require is_removed=false. First hit wins; returns null if
+ * nothing matches so the webhook can fall through to "unlinked" logging.
+ */
+async function findDeviceByExternalId(externalId: string): Promise<{ enterpriseId: string; deviceId: string } | null> {
+  const serialCandidates = externalId.startsWith("SIM-")
+    ? [externalId.slice(4), externalId]
+    : [externalId, `SIM-${externalId}`];
+  for (const cand of serialCandidates) {
+    const row = await runMaybe<{ id: string; enterprise_id: string }>(
+      db().from("devices").select("id, enterprise_id")
+        .eq("serial_number", cand).eq("is_removed", false).maybeSingle(),
+    );
+    if (row) return { enterpriseId: row.enterprise_id, deviceId: row.id };
   }
+  const byImei = await runMaybe<{ id: string; enterprise_id: string }>(
+    db().from("devices").select("id, enterprise_id")
+      .eq("imei", externalId).eq("is_removed", false).maybeSingle(),
+  );
+  return byImei ? { enterpriseId: byImei.enterprise_id, deviceId: byImei.id } : null;
+}
+
+/**
+ * Convenience for the webhook: fetch the loan once, enrich the link, then
+ * reconcile. If no loan_links row exists yet, try auto-linking by
+ * loan.externalId → devices.serial_number — the production path where
+ * Fineract's DISBURSE event is the trigger with no prior manual registration.
+ */
+export async function onLoanEvent(fineractLoanId: string, trigger: string): Promise<ReconcileBatchResult | null> {
+  let resolved = await resolveLoanToEnterprise(fineractLoanId);
   const today = todayDarISO();
   let loan: FineractLoanSummary | undefined;
   try {
@@ -152,8 +179,37 @@ export async function onLoanEvent(fineractLoanId: string, trigger: string): Prom
   } catch (e) {
     log("warn", "automation.loan_fetch_failed_webhook", { fineract_loan_id: fineractLoanId, error: String(e) });
   }
+
+  // Auto-link path: unknown loan + Fineract gave us an externalId → look up
+  // the device by serial/IMEI. First DISBURSE on a loan whose externalId is a
+  // device serial creates the loan_links row here, no human in the loop.
+  if (!resolved && loan?.externalId) {
+    const auto = await findDeviceByExternalId(loan.externalId);
+    if (auto) {
+      try {
+        await upsertLoanLink(auto.enterpriseId, auto.deviceId, loan);
+        resolved = auto;
+        log("info", "automation.loan_auto_linked", {
+          fineract_loan_id: fineractLoanId, device_id: auto.deviceId,
+          enterprise_id: auto.enterpriseId, external_id: loan.externalId, trigger,
+        });
+      } catch (e) {
+        log("warn", "automation.auto_link_failed", { fineract_loan_id: fineractLoanId, error: String(e) });
+      }
+    } else {
+      log("info", "automation.auto_link_no_device", { fineract_loan_id: fineractLoanId, external_id: loan.externalId });
+    }
+  }
+
+  if (!resolved) {
+    log("info", "automation.unlinked_loan", { fineract_loan_id: fineractLoanId, trigger, external_id: loan?.externalId ?? null });
+    return null;
+  }
+
   // Enrich on every event so a late-arriving email or a Fineract-side edit
-  // to the client propagates to loan_links on the next webhook.
+  // to the client propagates to loan_links on the next webhook. Also runs on
+  // the auto-link path to catch any field that upsertLoanLink's first call
+  // left null (notably clientEmail from /clients/{id}).
   if (loan) {
     try { await upsertLoanLink(resolved.enterpriseId, resolved.deviceId, loan); }
     catch (e) { log("warn", "automation.loan_link_upsert_failed", { fineract_loan_id: fineractLoanId, error: String(e) }); }
