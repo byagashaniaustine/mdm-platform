@@ -18,7 +18,7 @@
 
 import { db, run, runMaybe } from "../../lib/db.ts";
 import { log } from "../../lib/log.ts";
-import { applyOneDecision, type ApplyOutcome } from "./apply.ts";
+import { applyOneDecision, stampObserved, type ApplyOutcome } from "./apply.ts";
 import { loadPlan } from "./policy.ts";
 import type { DeviceDecision } from "./reconcile.ts";
 import { syncGroupMembership } from "../sync.ts";
@@ -161,6 +161,15 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
     // persistent error — this is NOT applied; downstream (alerts, UI) must
     // treat it as a failure that needs operator attention.
     const terminalState: JobState = hasError && !outcome.moved ? "dead" : "applied";
+
+    // On dead, re-read Zoho so device_tier_state reflects reality (not the
+    // last stamped applied_tier, which may be a lie now). On success, apply.ts
+    // already stamped observed_state inline — skip the re-read.
+    if (terminalState === "dead") {
+      try { await stampObserved(job.enterprise_id, job.device_id); }
+      catch (e) { log("warn", "apply_queue.stamp_observed_failed", { job_id: job.id, error: String(e) }); }
+    }
+
     await run(db().from("apply_jobs").update({
       state: terminalState,
       attempts: nextAttempt,
@@ -180,6 +189,15 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
     const exhausted = nextAttempt >= job.max_attempts;
     const state: JobState = exhausted ? "dead" : "pending";
     const next = exhausted ? null : new Date(Date.now() + backoffMs(nextAttempt)).toISOString();
+
+    // Same observed-state stamp on exhausted-retry path (the catch branch
+    // handles unexpected throws from applyOneDecision; the explicit terminal
+    // handling above covers in-outcome errors).
+    if (exhausted) {
+      try { await stampObserved(job.enterprise_id, job.device_id); }
+      catch (ee) { log("warn", "apply_queue.stamp_observed_failed", { job_id: job.id, error: String(ee) }); }
+    }
+
     await run(db().from("apply_jobs").update({
       state,
       attempts: nextAttempt,

@@ -26,8 +26,9 @@
 //
 // See LOAN_DEVICE_AUTOMATION.md §10 (apply path) and §11 (idempotency).
 
-import { db, run } from "../../lib/db.ts";
+import { db, run, runMaybe } from "../../lib/db.ts";
 import { log } from "../../lib/log.ts";
+import * as zoho from "../../zoho/api.ts";
 import { submitOperation } from "../events.ts";
 import { syncGroupMembership } from "../sync.ts";
 import type { DeviceDecision } from "./reconcile.ts";
@@ -217,24 +218,31 @@ export async function applyOneDecision(
     });
   }
 
-  // STEP E — Post-sync affected groups.
+  // STEP E — Post-sync (fire-and-forget) so the mirror catches up for the UI
+  // between apply and the next Supabase Realtime tick. Not awaited — verify
+  // below reads from Zoho directly, so apply correctness no longer depends on
+  // the mirror reflecting reality.
   const affected = new Set<string>(toRemove);
   affected.add(tp.targetGroupRowId);
   for (const gid of affected) {
-    try { await syncGroupMembership(enterpriseId, gid); }
-    catch (e) { log("warn", "automation.apply_postsync_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) }); }
+    syncGroupMembership(enterpriseId, gid).catch((e) =>
+      log("warn", "automation.apply_postsync_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) })
+    );
   }
 
-  // STEP F — Verify against the post-synced DB. Tier groups only (home-group
-  // membership is irrelevant to loan automation).
-  const verifiedMemberships = await run<{ group_id: string }[]>(
-    db().from("group_devices").select("group_id").eq("device_id", d.deviceId).in("group_id", tierGroupRowIds),
+  // STEP F — Verify directly against Zoho (not the mirror). Short internal
+  // retry absorbs Zoho's typical 3-15s group-membership propagation; the outer
+  // apply_queue backoff still handles anything that outlasts it.
+  const { nowInTarget, stillStuckIn, failedTargetRead } = await verifyAddFromZoho(
+    enterpriseId, d.deviceId, tp.targetGroupRowId, tierGroupRowIds,
   );
-  const nowInTarget = verifiedMemberships.some((m) => m.group_id === tp.targetGroupRowId);
-  const stillStuckIn = verifiedMemberships.filter((m) => m.group_id !== tp.targetGroupRowId).map((m) => m.group_id);
 
+  if (failedTargetRead) {
+    o.error = { code: "APPLY_VERIFY_UNREACHABLE", message: `Could not read "${tp.targetGroupName}" members from Zoho after add.` };
+    return o;
+  }
   if (!nowInTarget) {
-    o.error = { code: "APPLY_MOVE_NOT_VISIBLE", message: `Zoho acked the add to "${tp.targetGroupName}" but post-sync shows the device is not a member.` };
+    o.error = { code: "APPLY_MOVE_NOT_VISIBLE", message: `Zoho acked the add to "${tp.targetGroupName}" but Zoho still does not list the device as a member after ${VERIFY_DELAYS_MS.reduce((a, b) => a + b, 0) / 1000}s.` };
     return o;
   }
   if (stillStuckIn.length) {
@@ -263,8 +271,40 @@ export async function applyOneDecision(
   return o;
 }
 
+/**
+ * Verify-step retry cadence (ms). Zoho's group-membership propagation runs
+ * ~3-15s per their status-page history; these three delays total ~17s, long
+ * enough to catch the usual tail while staying well under the apply_queue
+ * claim-lock (120s).
+ */
+const VERIFY_DELAYS_MS = [2_000, 5_000, 10_000];
+
+/** Direct-from-Zoho verify of a group.add_devices action, with internal retries. */
+async function verifyAddFromZoho(
+  enterpriseId: string,
+  deviceRowId: string,
+  targetGroupRowId: string,
+  tierGroupRowIds: string[],
+): Promise<{ nowInTarget: boolean; stillStuckIn: string[]; failedTargetRead: boolean }> {
+  let last: Awaited<ReturnType<typeof queryZohoMemberships>> | null = null;
+  for (let i = 0; i <= VERIFY_DELAYS_MS.length; i++) {
+    last = await queryZohoMemberships(enterpriseId, deviceRowId, tierGroupRowIds);
+    if (last.membership.get(targetGroupRowId)) break;
+    if (last.failed.has(targetGroupRowId)) break; // network/auth error — don't burn more retries
+    if (i < VERIFY_DELAYS_MS.length) await new Promise((r) => setTimeout(r, VERIFY_DELAYS_MS[i]));
+  }
+  const membership = last?.membership ?? new Map<string, boolean>();
+  const failed = last?.failed ?? new Set<string>();
+  const nowInTarget = !!membership.get(targetGroupRowId);
+  const stillStuckIn = [...membership.entries()]
+    .filter(([gid, inGroup]) => gid !== targetGroupRowId && inGroup)
+    .map(([gid]) => gid);
+  return { nowInTarget, stillStuckIn, failedTargetRead: failed.has(targetGroupRowId) };
+}
+
 /** Upsert device_tier_state.applied_tier + current_group_id after verified move. */
 async function stampApplied(enterpriseId: string, deviceId: string, tier: Tier, groupRowId: string, dpd: number): Promise<void> {
+  const nowIso = new Date().toISOString();
   await run(db().from("device_tier_state").upsert({
     enterprise_id: enterpriseId,
     device_id: deviceId,
@@ -272,6 +312,101 @@ async function stampApplied(enterpriseId: string, deviceId: string, tier: Tier, 
     applied_tier: tier,
     current_group_id: groupRowId,
     last_loan_dpd: dpd >= 0 ? dpd : null,
-    updated_at: new Date().toISOString(),
+    observed_state: tier,
+    observed_at: nowIso,
+    last_error: null,
+    updated_at: nowIso,
+  }, { onConflict: "enterprise_id,device_id" }));
+}
+
+/**
+ * Ask Zoho directly which of `groupRowIds` the device actually belongs to.
+ * Returns a per-group boolean. Groups whose read failed are in `failed` and
+ * get no entry in `membership` — callers must treat them as "unknown".
+ *
+ * This is the verify + observed-state source of truth. Reads from the
+ * group_devices mirror are intentionally avoided here: that mirror lags Zoho
+ * (eventual-consistency + add-only reconcile in syncGroupMembership), which
+ * was the APPLY_MOVE_NOT_VISIBLE root cause.
+ */
+export async function queryZohoMemberships(
+  enterpriseId: string,
+  deviceRowId: string,
+  groupRowIds: string[],
+): Promise<{ membership: Map<string, boolean>; failed: Set<string> }> {
+  const membership = new Map<string, boolean>();
+  const failed = new Set<string>();
+  if (!groupRowIds.length) return { membership, failed };
+
+  const dev = await runMaybe<{ zoho_device_id: number | null }>(
+    db().from("devices").select("zoho_device_id").eq("id", deviceRowId).eq("enterprise_id", enterpriseId).maybeSingle(),
+  );
+  const zohoDeviceId = String(dev?.zoho_device_id ?? "");
+  if (!zohoDeviceId) {
+    for (const gid of groupRowIds) failed.add(gid);
+    return { membership, failed };
+  }
+
+  const groups = await run<{ id: string; zoho_group_id: string | null }[]>(
+    db().from("groups").select("id, zoho_group_id").in("id", groupRowIds).eq("enterprise_id", enterpriseId),
+  );
+
+  for (const g of groups) {
+    if (!g.zoho_group_id) { failed.add(g.id); continue; }
+    try {
+      const members = await zoho.listGroupMembers(enterpriseId, g.zoho_group_id);
+      const memberZohoIds = new Set<string>();
+      for (const m of members) {
+        const id = typeof m === "string" || typeof m === "number"
+          ? String(m)
+          : String((m as Record<string, unknown>).device_id ?? (m as Record<string, unknown>).member_id ?? (m as Record<string, unknown>).resource_id ?? "");
+        if (id) memberZohoIds.add(id);
+      }
+      membership.set(g.id, memberZohoIds.has(zohoDeviceId));
+    } catch (e) {
+      log("warn", "automation.zoho_members_read_failed", { enterprise_id: enterpriseId, group_id: g.id, error: String(e) });
+      failed.add(g.id);
+    }
+  }
+  return { membership, failed };
+}
+
+/**
+ * Re-read Zoho after a terminal apply_jobs transition and persist the device's
+ * actual tier membership to device_tier_state. On Zoho failure, stamps
+ * observed_state='unknown' + last_error so the frontend can show "we don't
+ * know" instead of a stale applied_tier.
+ *
+ * Called from apply_queue.ts when a job reaches 'dead' (or 'applied' with
+ * residual drift). The happy-path stampApplied() already writes observed_state
+ * in-line, so this is purely for terminal-state truthing.
+ */
+export async function stampObserved(enterpriseId: string, deviceId: string): Promise<void> {
+  const nowIso = new Date().toISOString();
+  const plan = await loadPlan(enterpriseId);
+  const tierGroupRowIds = [...new Set([...plan.values()].map((p) => p.targetGroupRowId))];
+  const tierByGroupRowId = new Map<string, Tier>();
+  for (const [key, p] of plan.entries()) {
+    const tier = key.split(":")[0] as Tier;
+    tierByGroupRowId.set(p.targetGroupRowId, tier);
+  }
+
+  const { membership, failed } = await queryZohoMemberships(enterpriseId, deviceId, tierGroupRowIds);
+  const observedGroups = [...membership.entries()].filter(([, inGroup]) => inGroup).map(([gid]) => gid);
+  const observedTier = observedGroups.length === 1 ? (tierByGroupRowId.get(observedGroups[0]) ?? null) : null;
+  const unknown = failed.has(tierGroupRowIds[0]) && !observedGroups.length; // couldn't read any group
+  const multiple = observedGroups.length > 1;
+
+  const observed_state = unknown ? "unknown" : (observedTier ?? (multiple ? "drift" : "none"));
+  const last_error = unknown ? "Zoho group-members read failed on terminal re-check" : (multiple ? `In multiple tier groups: ${observedGroups.join(", ")}` : null);
+
+  await run(db().from("device_tier_state").upsert({
+    enterprise_id: enterpriseId,
+    device_id: deviceId,
+    observed_state,
+    observed_at: nowIso,
+    last_error,
+    current_group_id: observedGroups[0] ?? null,
+    updated_at: nowIso,
   }, { onConflict: "enterprise_id,device_id" }));
 }
