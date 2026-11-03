@@ -624,10 +624,25 @@ const SYNC_LEASE_SECONDS = 20 * 60;
 /** Compliance often returns Zoho 500 for accounts without the feature: after a failure, the
  *  scheduled sync leaves it alone for a while (a manual sync still tries). */
 const COMPLIANCE_BACKOFF_MS = 6 * 3600_000;
-const complianceFailedAt = new Map<string, number>();
 /** Zoho answered 4xx (e.g. 405: the compliance API isn't on this account): skip it for a day, even on manual sync. */
-const complianceUnavailableAt = new Map<string, number>();
 const COMPLIANCE_UNAVAILABLE_MS = 24 * 3600_000;
+
+/**
+ * Durable per-endpoint backoff state in `worker_state` (key `backoff:<endpoint>:<eid>`).
+ * Previously these were module-scope Maps that reset on every Deno Deploy cold start,
+ * so the intended 24h/6h skips never actually fired and we hammered the dead endpoint
+ * every 15 min. Same fix pattern as readTs/writeTs in worker.ts (migration 015).
+ */
+type BackoffState = { failed_at?: number; unavailable_until?: number; last_status?: number };
+async function readBackoff(endpoint: string, eid: string): Promise<BackoffState> {
+  const { data } = await db().from("worker_state").select("value").eq("key", `backoff:${endpoint}:${eid}`).maybeSingle();
+  return (data?.value as BackoffState | null | undefined) ?? {};
+}
+async function writeBackoff(endpoint: string, eid: string, patch: BackoffState): Promise<void> {
+  const prior = await readBackoff(endpoint, eid);
+  const next = { ...prior, ...patch };
+  await db().from("worker_state").upsert({ key: `backoff:${endpoint}:${eid}`, value: next, updated_at: nowIso() }, { onConflict: "key" });
+}
 
 /**
  * One sync per enterprise at a time, across every process (lease "sync:<eid>").
@@ -690,13 +705,16 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
   const result: Record<string, number | string> = {};
   for (const resource of ordered) {
     await renew();
-    if (resource === "compliance" && Date.now() - (complianceUnavailableAt.get(eid) ?? 0) < COMPLIANCE_UNAVAILABLE_MS) {
-      result[resource] = "skipped: not available on this Zoho account";
-      continue;
-    }
-    if (resource === "compliance" && !adminId && Date.now() - (complianceFailedAt.get(eid) ?? 0) < COMPLIANCE_BACKOFF_MS) {
-      result[resource] = "skipped: failed recently";
-      continue;
+    if (resource === "compliance") {
+      const bo = await readBackoff("compliance", eid);
+      if ((bo.unavailable_until ?? 0) > Date.now()) {
+        result[resource] = "skipped: not available on this Zoho account";
+        continue;
+      }
+      if (!adminId && Date.now() - (bo.failed_at ?? 0) < COMPLIANCE_BACKOFF_MS) {
+        result[resource] = "skipped: failed recently";
+        continue;
+      }
     }
     // sync_runs is bookkeeping — if its CHECK constraint rejects a new resource key
     // (migration not yet applied), log and still run the syncer so data flows.
@@ -712,7 +730,7 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
     try {
       const items = await SYNCERS[resource](eid);
       result[resource] = items;
-      if (resource === "compliance") complianceFailedAt.delete(eid);
+      if (resource === "compliance") await writeBackoff("compliance", eid, { failed_at: 0, unavailable_until: 0, last_status: 200 });
       if (runId) {
         await db().from("sync_runs").update({ status: "succeeded", items, finished_at: nowIso() }).eq("id", runId);
       }
@@ -720,8 +738,9 @@ async function syncEnterpriseLocked(eid: string, resources: Resource[], adminId:
       const err = toAppError(e);
       result[resource] = `error: ${err.code}`;
       if (resource === "compliance") {
-        complianceFailedAt.set(eid, Date.now());
-        if (err.code === "ZOHO_BAD_REQUEST" || err.code === "ZOHO_NOT_FOUND") complianceUnavailableAt.set(eid, Date.now());
+        const patch: BackoffState = { failed_at: Date.now(), last_status: err.code === "ZOHO_BAD_REQUEST" ? 405 : err.code === "ZOHO_NOT_FOUND" ? 404 : 500 };
+        if (err.code === "ZOHO_BAD_REQUEST" || err.code === "ZOHO_NOT_FOUND") patch.unavailable_until = Date.now() + COMPLIANCE_UNAVAILABLE_MS;
+        await writeBackoff("compliance", eid, patch);
       }
       if (runId) {
         await db().from("sync_runs").update({ status: "failed", error: `${err.code}: ${err.message}`.slice(0, 500), finished_at: nowIso() })
