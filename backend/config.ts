@@ -46,11 +46,6 @@ export type Config = Readonly<{
   // configured).
   simCallbackUrl: string;
   simCallbackSecret: string;
-  // --- Sim → MDM Fineract read proxy (PR 2 of the Fineract integration) ---
-  // The sim calls GET /api/fineract/loans and /loans/{id} with
-  // X-Sim-Proxy-Secret matching this value. Keeps Fineract credentials on
-  // the backend; sim stays unprivileged for Fineract reads.
-  simProxySecret: string;
 }>;
 
 const DEFAULT_SCOPES = [
@@ -123,7 +118,6 @@ export function getConfig(): Config {
     automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 30),
     simCallbackUrl: env("SIM_CALLBACK_URL", "").replace(/\/$/, ""),
     simCallbackSecret: env("SIM_CALLBACK_SECRET", ""),
-    simProxySecret: env("SIM_PROXY_SECRET", ""),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");
