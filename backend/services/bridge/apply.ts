@@ -30,6 +30,7 @@ import { db, run, runMaybe } from "../../lib/db.ts";
 import { log } from "../../lib/log.ts";
 import * as zoho from "../../zoho/api.ts";
 import { submitOperation } from "../events.ts";
+import { paymentReminderMail, type ReminderTier, sendMail } from "../mail.ts";
 import { syncGroupMembership } from "../sync.ts";
 import type { DeviceDecision } from "./reconcile.ts";
 import { loadPlan } from "./policy.ts";
@@ -252,7 +253,11 @@ export async function applyOneDecision(
   o.moved = true;
   o.removedFrom = toRemove.map((g) => groupNames.get(g) ?? g);
 
-  // STEP G — Announcement to the specific device.
+  // STEP G — Announcement to the specific device, and the matching payment-
+  // reminder email to the device's assigned user. Both share the tier filter
+  // (only due_2d / overdue_2d / locked have an announcementRowId); released
+  // sends only the email (settlement confirmation). Email is fire-and-forget —
+  // a Resend failure must not block the apply.
   if (tp.announcementRowId) {
     await submitOperation({
       enterpriseId,
@@ -264,6 +269,11 @@ export async function applyOneDecision(
       idempotencyKey: `${key}:ann`,
     });
     o.announcementSent = true;
+  }
+  if (REMINDER_TIERS.has(d.to)) {
+    fireReminderEmail(enterpriseId, d.deviceId, d.to as ReminderTier, d.dpd, d.loanId, key).catch((e) =>
+      log("warn", "automation.reminder_email_failed", { enterprise_id: enterpriseId, device_id: d.deviceId, tier: d.to, error: String(e) })
+    );
   }
 
   // STEP H — Stamp applied_tier only after verified success.
@@ -300,6 +310,105 @@ async function verifyAddFromZoho(
     .filter(([gid, inGroup]) => gid !== targetGroupRowId && inGroup)
     .map(([gid]) => gid);
   return { nowInTarget, stillStuckIn, failedTargetRead: failed.has(targetGroupRowId) };
+}
+
+/**
+ * Payment-reminder email, fired alongside the device announcement in STEP G.
+ * Keyed off the same {loan, tier} pair as the announcement so we only email
+ * once per transition — if the apply queue retries the batch after a Zoho
+ * blip, the dedupe row short-circuits the second send. Fire-and-forget; the
+ * caller logs failures.
+ *
+ * Sends ONLY the three loan stages with a device-side announcement (due_2d,
+ * overdue_2d, locked) plus `released` as the settlement confirmation. The
+ * tier filter in apply.ts matches this set.
+ */
+const REMINDER_TIERS = new Set<Tier>(["due_2d", "overdue_2d", "locked", "released"]);
+
+async function fireReminderEmail(
+  enterpriseId: string,
+  deviceId: string,
+  tier: ReminderTier,
+  dpd: number,
+  loanId: string,
+  dedupeKey: string,
+): Promise<void> {
+  // Idempotency guard: one row per (loan, tier) in events already serialises
+  // the announcement; piggyback on it for the email by stamping a dedupe row
+  // in `events` with a distinct suffix. If the insert conflicts, somebody
+  // already emailed — skip.
+  const emailKey = `${dedupeKey}:email`;
+  const existing = await runMaybe<{ id: string }>(
+    db().from("events").select("id").eq("enterprise_id", enterpriseId).eq("idempotency_key", emailKey).maybeSingle(),
+  );
+  if (existing) return;
+
+  // Device → mdm_user → email + name. Also pull enterprise name + loan due date
+  // for copy — all optional reads so a missing field doesn't abort the send.
+  const dev = await runMaybe<{ assigned_user_id: string | null }>(
+    db().from("devices").select("assigned_user_id").eq("id", deviceId).eq("enterprise_id", enterpriseId).maybeSingle(),
+  );
+  if (!dev?.assigned_user_id) {
+    log("info", "automation.reminder_email_no_user", { enterprise_id: enterpriseId, device_id: deviceId, tier });
+    return;
+  }
+  const user = await runMaybe<{ email: string | null; user_name: string | null }>(
+    db().from("mdm_users").select("email, user_name").eq("id", dev.assigned_user_id).maybeSingle(),
+  );
+  if (!user?.email) {
+    log("info", "automation.reminder_email_no_email", { enterprise_id: enterpriseId, device_id: deviceId, tier, user_id: dev.assigned_user_id });
+    return;
+  }
+  const enterprise = await runMaybe<{ name: string }>(
+    db().from("enterprises").select("name").eq("id", enterpriseId).maybeSingle(),
+  );
+  const link = await runMaybe<{ due_on: string | null }>(
+    db().from("loan_links").select("due_on").eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).eq("status", "active").maybeSingle(),
+  );
+
+  // Claim the slot with state='requested' — the unique (enterprise_id,
+  // idempotency_key) index makes a concurrent fire fail here and skip. On
+  // success we stamp 'succeeded'; on send failure we stamp 'failed' so the
+  // operator sees what happened in the events feed. We don't auto-retry
+  // payment reminders — a dropped email is less harmful than two.
+  const inserted = await runMaybe<{ id: string }>(
+    db().from("events").insert({
+      enterprise_id: enterpriseId,
+      category: "announcement",
+      action: "payment_reminder.email",
+      device_id: deviceId,
+      params: { tier, dpd, to: user.email },
+      idempotency_key: emailKey,
+      state: "requested",
+    }).select("id").maybeSingle(),
+  );
+  if (!inserted) {
+    log("info", "automation.reminder_email_concurrent", { enterprise_id: enterpriseId, device_id: deviceId, tier });
+    return;
+  }
+
+  try {
+    await sendMail(paymentReminderMail({
+      to: user.email,
+      userName: user.user_name,
+      enterpriseName: enterprise?.name ?? "Your lender",
+      tier,
+      dpd,
+      dueOn: link?.due_on ?? null,
+    }));
+    await run(db().from("events").update({
+      state: "succeeded",
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    await run(db().from("events").update({
+      state: "failed",
+      error_message: (err.message ?? String(e)).slice(0, 500),
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+    throw e;
+  }
 }
 
 /** Upsert device_tier_state.applied_tier + current_group_id after verified move. */

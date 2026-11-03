@@ -16,6 +16,7 @@ export type Config = Readonly<{
   zeptomailToken: string;
   zeptomailUrl: string;
   resendApiKey: string;
+  resendFromAddress: string;    // RESEND_FROM_ADDRESS: overrides mailFrom for Resend-only sends (Harvey's convention)
   sendgridApiKey: string;
   mailFrom: string;
   mailTestRedirect: boolean;   // Resend test mode: reroute all mail to one allowed address
@@ -91,6 +92,7 @@ export function getConfig(): Config {
     zeptomailToken: env("ZEPTOMAIL_TOKEN", ""),
     zeptomailUrl: env("ZEPTOMAIL_URL", "https://zeptomail.zoho.com/v1.1/email"),
     resendApiKey: env("RESEND_API_KEY", ""),
+    resendFromAddress: env("RESEND_FROM_ADDRESS", ""),
     sendgridApiKey: env("SENDGRID_API_KEY", ""),
     mailFrom: env("MAIL_FROM", "MDM Console <no-reply@example.com>"),
     // Resend's testing domain (onboarding@resend.dev) only delivers to the account owner,
