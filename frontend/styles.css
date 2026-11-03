@@ -101,6 +101,24 @@ input:disabled, select:disabled { background: var(--neutral-bg); color: var(--mu
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .field > label { font-weight: 500; font-size: 0.86rem; }
 .hint { font-size: 0.8rem; color: var(--muted); margin: 0; }
+
+/* Password field with show/hide eye toggle on the right. The input fills the
+ * row; the toggle is a borderless button that overlays the input's right edge. */
+.pw-group { position: relative; display: flex; align-items: stretch; }
+.pw-group > input { flex: 1; padding-right: 2.2rem; }
+.pw-group > .pw-eye {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: 0; padding: 0 .4rem; font-size: 1.05rem;
+  line-height: 1; cursor: pointer; color: var(--muted); user-select: none;
+}
+.pw-group > .pw-eye:hover { color: inherit; }
+
+/* Live match indicator for a password + confirm pair. Lives in the hint slot
+ * (bottom of the field), so no extra layout room is needed. */
+.pw-match { font-size: 0.8rem; }
+.pw-match.ok  { color: var(--ok, #16a34a); }
+.pw-match.bad { color: var(--err, #dc2626); }
+
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .spacer { flex: 1; }

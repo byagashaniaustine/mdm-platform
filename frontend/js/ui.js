@@ -156,6 +156,58 @@ export function field(label, input, hint) {
 
 export const input = (attrs = {}) => h("input", { type: "text", ...attrs });
 
+/** Password input wrapped with a show/hide eye toggle on the right.
+ *  Returns { input, group } — pass `input` to anywhere expecting an input node
+ *  (e.g. field()), and mount `group` in the DOM. The toggle keeps the input
+ *  focused and the caret position intact.
+ */
+export function passwordWithEye(attrs = {}) {
+  const inp = h("input", { type: "password", autocomplete: "new-password", ...attrs });
+  const btn = h("button", {
+    type: "button",
+    class: "pw-eye",
+    "aria-label": "Show password",
+    "aria-pressed": "false",
+    tabindex: "-1",
+    title: "Show password",
+  }, "👁");
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const show = inp.type === "password";
+    inp.type = show ? "text" : "password";
+    btn.setAttribute("aria-pressed", show ? "true" : "false");
+    btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    btn.title = show ? "Hide password" : "Show password";
+    btn.textContent = show ? "🙈" : "👁";
+    const pos = inp.value.length;
+    inp.focus();
+    try { inp.setSelectionRange(pos, pos); } catch { /* some inputs don't support */ }
+  });
+  const group = h("div", { class: "pw-group" }, inp, btn);
+  return { input: inp, group };
+}
+
+/** Live match indicator for a password + confirm pair. Returns a span whose
+ *  text and class update as either input changes. Empty confirm shows no
+ *  message to avoid screaming at the user before they finish typing.
+ */
+export function passwordMatchHint(pw, cf) {
+  const hint = h("span", { class: "pw-match", "aria-live": "polite" });
+  const update = () => {
+    if (!cf.value) { hint.className = "pw-match"; hint.textContent = ""; return; }
+    if (pw.value === cf.value) {
+      hint.className = "pw-match ok";
+      hint.textContent = "✓ passwords match";
+    } else {
+      hint.className = "pw-match bad";
+      hint.textContent = "✗ passwords don’t match";
+    }
+  };
+  pw.addEventListener("input", update);
+  cf.addEventListener("input", update);
+  return hint;
+}
+
 export function select(options, attrs = {}) {
   return h(
     "select",

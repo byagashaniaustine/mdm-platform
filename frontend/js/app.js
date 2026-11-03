@@ -1,5 +1,5 @@
 import { get, post, setUnauthorizedHandler } from "./api.js";
-import { ago, clear, field, h, icon, input, toast, toastError } from "./ui.js";
+import { ago, clear, field, h, icon, input, passwordMatchHint, passwordWithEye, toast, toastError } from "./ui.js";
 import { overviewView } from "./views/overview.js";
 import { deviceDetailView, devicesView } from "./views/devices.js";
 import { groupDetailView, groupsView } from "./views/groups.js";
@@ -377,13 +377,17 @@ function invitePasteScreen() {
   document.title = "Accept invite · Device Console";
   const code = input({ type: "text", required: true, placeholder: "paste the invite code from your email", autocomplete: "off", spellcheck: "false" });
   code.style.fontFamily = "JetBrains Mono, ui-monospace, monospace";
-  const pw = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10, placeholder: "At least 10 characters" });
-  const cf = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const pwPair = passwordWithEye({ required: true, minlength: 10, placeholder: "At least 10 characters", id: `pw-${Math.random().toString(36).slice(2, 7)}` });
+  const cfPair = passwordWithEye({ required: true, minlength: 10, id: `cf-${Math.random().toString(36).slice(2, 7)}` });
+  const pw = pwPair.input, cf = cfPair.input;
+  const match = passwordMatchHint(pw, cf);
+  const pwField = h("div", { class: "field" }, h("label", { for: pw.id }, "New password"), pwPair.group, h("p", { class: "hint" }, "At least 10 characters."));
+  const cfField = h("div", { class: "field" }, h("label", { for: cf.id }, "Confirm password"), cfPair.group, h("p", { class: "hint" }, match));
   const form = h("form", { class: "stack" },
     h("p", { class: "muted" }, "If the link in your email didn't open the console, paste the invite code from the email here and set a password. You'll be signed in right after."),
     field("Invite code", code, "Copy it from the \"Invite code\" line in the email."),
-    field("New password", pw, "At least 10 characters."),
-    field("Confirm password", cf),
+    pwField,
+    cfField,
     h("button", { class: "btn btn-primary", type: "submit" }, "Set password and sign in"),
   );
   form.addEventListener("submit", async (e) => {
@@ -421,12 +425,16 @@ function invitePasteScreen() {
 function inviteScreen(code) {
   ctx.shell = null;
   document.title = "Set your password · Device Console";
-  const pw = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10, placeholder: "At least 10 characters" });
-  const cf = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const pwPair = passwordWithEye({ required: true, minlength: 10, placeholder: "At least 10 characters", id: `pw-${Math.random().toString(36).slice(2, 7)}` });
+  const cfPair = passwordWithEye({ required: true, minlength: 10, id: `cf-${Math.random().toString(36).slice(2, 7)}` });
+  const pw = pwPair.input, cf = cfPair.input;
+  const match = passwordMatchHint(pw, cf);
+  const pwField = h("div", { class: "field" }, h("label", { for: pw.id }, "New password"), pwPair.group, h("p", { class: "hint" }, "At least 10 characters."));
+  const cfField = h("div", { class: "field" }, h("label", { for: cf.id }, "Confirm password"), cfPair.group, h("p", { class: "hint" }, match));
   const form = h("form", { class: "stack" },
     h("p", { class: "muted" }, "Set the password for your Device Console account. You'll be signed in right after."),
-    field("New password", pw, "At least 10 characters."),
-    field("Confirm password", cf),
+    pwField,
+    cfField,
     h("button", { class: "btn btn-primary", type: "submit" }, "Set password and sign in"),
   );
   form.addEventListener("submit", async (e) => {
