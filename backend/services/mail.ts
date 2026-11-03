@@ -209,6 +209,14 @@ export function inviteMail(opts: {
 }): Mail {
   const { to, link, kind, enterpriseName, inviter, role, expiresAt } = opts;
   const expires = expiresAt.toUTCString();
+  // Pull the invite code + paste-URL out of the link. The invitee can either
+  // click the direct link (works when APP_URL is reachable from their browser)
+  // or paste the code into the console they already have access to — email
+  // links that look like localhost or an internal URL stay useful either way.
+  const code = (link.match(/[?&]invite=([^&]+)/) || [, ""])[1];
+  const base = link.split("/?")[0].replace(/\/$/, "");
+  const pasteUrl = `${base}/#/invite`;
+
   if (kind === "reset") {
     return {
       to,
@@ -216,10 +224,13 @@ export function inviteMail(opts: {
       text:
 `${inviter} created a password reset link for your Device Console account.
 
-Open this link to set a new password:
+Option A — click the one-step link:
   ${link}
 
-The link works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
+Option B — if the link doesn't open, go to ${pasteUrl} and paste this code:
+  ${code}
+
+Either way, the code works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
     };
   }
   return {
@@ -228,9 +239,12 @@ The link works once and expires on ${expires}. If you weren't expecting this, ig
     text:
 `${inviter} added you to ${enterpriseName} on the Device Console as a ${role}.
 
-Open this link to set your password and sign in:
+Option A — click the one-step link to set your password:
   ${link}
 
-The link works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
+Option B — if the link doesn't open, go to ${pasteUrl} and paste this invite code:
+  ${code}
+
+Either way, the code works once and expires on ${expires}. If you weren't expecting this, ignore the email.`,
   };
 }

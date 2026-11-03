@@ -367,6 +367,57 @@ function stripInviteFromUrl() {
   history.replaceState(null, "", u.pathname + u.search);
 }
 
+/** Standalone invite-code paste screen for when the direct link doesn't work
+ *  (e.g., APP_URL points at localhost but the invitee is on a different machine).
+ *  Reachable at <appUrl>/#/invite — the email includes the code as text so the
+ *  invitee can paste it here and set a password without needing the one-click link.
+ */
+function invitePasteScreen() {
+  ctx.shell = null;
+  document.title = "Accept invite · Device Console";
+  const code = input({ type: "text", required: true, placeholder: "paste the invite code from your email", autocomplete: "off", spellcheck: "false" });
+  code.style.fontFamily = "JetBrains Mono, ui-monospace, monospace";
+  const pw = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10, placeholder: "At least 10 characters" });
+  const cf = input({ type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+  const form = h("form", { class: "stack" },
+    h("p", { class: "muted" }, "If the link in your email didn't open the console, paste the invite code from the email here and set a password. You'll be signed in right after."),
+    field("Invite code", code, "Copy it from the \"Invite code\" line in the email."),
+    field("New password", pw, "At least 10 characters."),
+    field("Confirm password", cf),
+    h("button", { class: "btn btn-primary", type: "submit" }, "Set password and sign in"),
+  );
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const codeVal = code.value.trim();
+    if (!/^[0-9a-f-]{36}\.[A-Za-z0-9_\-]{20,100}$/.test(codeVal)) return toast("That doesn't look like an invite code", "warn");
+    if (pw.value !== cf.value) return toast("Passwords don't match", "warn");
+    try {
+      await post("/api/auth/accept-invite", { code: codeVal, password: pw.value });
+      // Clear the hash + boot into the signed-in state.
+      history.replaceState(null, "", location.pathname + location.search);
+      await boot();
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  clear(root,
+    h("main", { class: "auth" },
+      h("section", { class: "auth-hero" },
+        h("img", { src: "/assets/logo-negative.svg", alt: "Black Swan" }),
+        h("div", {}, h("p", { class: "eyebrow" }, "Device Console"), h("h1", {}, "Accept your invite."), h("p", {}, "Paste the code from your email, set a password, and you're in.")),
+      ),
+      h("section", { class: "auth-main" },
+        h("div", { class: "auth-card" },
+          h("img", { class: "logo-mobile", src: "/assets/logo-primary.svg", alt: "Black Swan" }),
+          h("h2", {}, "Accept invite"),
+          form,
+        ),
+      ),
+    ),
+  );
+  code.focus();
+}
+
 function inviteScreen(code) {
   ctx.shell = null;
   document.title = "Set your password · Device Console";
@@ -409,6 +460,10 @@ function inviteScreen(code) {
 
 async function boot() {
   const invite = inviteCodeFromUrl();
+  // Explicit paste-the-code route — reachable at <appUrl>/#/invite. Doesn't
+  // need any URL params and doesn't depend on APP_URL being correct in the
+  // email link. The owner can share just this URL + the code separately.
+  const pasteRoute = /^#\/?invite\b/.test(location.hash);
   try {
     ctx.me = await get("/api/auth/me");
   } catch {
@@ -420,6 +475,13 @@ async function boot() {
       ctx.me = null;
     }
     return inviteScreen(invite);
+  }
+  if (pasteRoute) {
+    if (ctx.me) {
+      await post("/api/auth/logout", {}).catch(() => {});
+      ctx.me = null;
+    }
+    return invitePasteScreen();
   }
   if (!ctx.me) return authScreen();
   ctx.shell = null;

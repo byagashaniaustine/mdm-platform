@@ -91,7 +91,7 @@ export async function settingsView(el, ctx, params) {
     const em = input({ type: "email" });
     const nm = input({});
     const role = select([{ value: "admin", label: "Admin — manage devices, groups, profiles" }, { value: "viewer", label: "Viewer — read only, identifiers masked" }]);
-    modal("Invite admin", h("div", { class: "stack" }, field("Email", em), field("Name", nm), field("Role", role), h("p", { class: "muted" }, "We email them an invite link to set their password. You also get the link to copy, in case the email doesn't arrive.")), [
+    modal("Invite admin", h("div", { class: "stack" }, field("Email", em), field("Name", nm), field("Role", role), h("p", { class: "muted" }, "We email them a one-step link + an invite code. You also get the link to copy, in case the email doesn't arrive — the invitee can paste the code at /#/invite if the link isn't reachable from their browser.")), [
       { label: "Cancel" },
       { label: "Invite", tone: "primary", onClick: async () => {
         const { data } = await post("/api/admins", { email: em.value, fullName: nm.value, role: role.value });
