@@ -343,27 +343,36 @@ async function fireReminderEmail(
   );
   if (existing) return;
 
-  // Device → mdm_user → email + name. Also pull enterprise name + loan due date
-  // for copy — all optional reads so a missing field doesn't abort the send.
-  const dev = await runMaybe<{ assigned_user_id: string | null }>(
-    db().from("devices").select("assigned_user_id").eq("id", deviceId).eq("enterprise_id", enterpriseId).maybeSingle(),
+  // Resolve the recipient. Prefer the debtor identity on loan_links (set by
+  // the LMS sim's register-debtor flow or by a Fineract integration that puts
+  // client email in the loan). Fall back to the device → mdm_user → email path
+  // when the loan has no client contact — covers the admin-managed inventory
+  // where every device has an owner on file.
+  const link = await runMaybe<{ due_on: string | null; client_email: string | null; client_name: string | null }>(
+    db().from("loan_links").select("due_on, client_email, client_name").eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).eq("status", "active").maybeSingle(),
   );
-  if (!dev?.assigned_user_id) {
-    log("info", "automation.reminder_email_no_user", { enterprise_id: enterpriseId, device_id: deviceId, tier });
-    return;
-  }
-  const user = await runMaybe<{ email: string | null; user_name: string | null }>(
-    db().from("mdm_users").select("email, user_name").eq("id", dev.assigned_user_id).maybeSingle(),
-  );
-  if (!user?.email) {
-    log("info", "automation.reminder_email_no_email", { enterprise_id: enterpriseId, device_id: deviceId, tier, user_id: dev.assigned_user_id });
-    return;
+  let toEmail = link?.client_email ?? null;
+  let toName = link?.client_name ?? null;
+  if (!toEmail) {
+    const dev = await runMaybe<{ assigned_user_id: string | null }>(
+      db().from("devices").select("assigned_user_id").eq("id", deviceId).eq("enterprise_id", enterpriseId).maybeSingle(),
+    );
+    if (!dev?.assigned_user_id) {
+      log("info", "automation.reminder_email_no_user", { enterprise_id: enterpriseId, device_id: deviceId, tier });
+      return;
+    }
+    const user = await runMaybe<{ email: string | null; user_name: string | null }>(
+      db().from("mdm_users").select("email, user_name").eq("id", dev.assigned_user_id).maybeSingle(),
+    );
+    if (!user?.email) {
+      log("info", "automation.reminder_email_no_email", { enterprise_id: enterpriseId, device_id: deviceId, tier, user_id: dev.assigned_user_id });
+      return;
+    }
+    toEmail = user.email;
+    toName = user.user_name;
   }
   const enterprise = await runMaybe<{ name: string }>(
     db().from("enterprises").select("name").eq("id", enterpriseId).maybeSingle(),
-  );
-  const link = await runMaybe<{ due_on: string | null }>(
-    db().from("loan_links").select("due_on").eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).eq("status", "active").maybeSingle(),
   );
 
   // Claim the slot with state='requested' — the unique (enterprise_id,
@@ -371,15 +380,20 @@ async function fireReminderEmail(
   // success we stamp 'succeeded'; on send failure we stamp 'failed' so the
   // operator sees what happened in the events feed. We don't auto-retry
   // payment reminders — a dropped email is less harmful than two.
+  // Insert at state='sent' (not 'requested') so the generic worker.claimDue
+  // loop — which looks for 'requested' events to dispatch via registered
+  // executors — can't race us and mark the row "No executor for
+  // payment_reminder.email". This event is inline-processed; the worker
+  // shouldn't touch it.
   const inserted = await runMaybe<{ id: string }>(
     db().from("events").insert({
       enterprise_id: enterpriseId,
       category: "announcement",
       action: "payment_reminder.email",
       device_id: deviceId,
-      params: { tier, dpd, to: user.email },
+      params: { tier, dpd, to: toEmail },
       idempotency_key: emailKey,
-      state: "requested",
+      state: "sent",
     }).select("id").maybeSingle(),
   );
   if (!inserted) {
@@ -389,8 +403,8 @@ async function fireReminderEmail(
 
   try {
     await sendMail(paymentReminderMail({
-      to: user.email,
-      userName: user.user_name,
+      to: toEmail,
+      userName: toName,
       enterpriseName: enterprise?.name ?? "Your lender",
       tier,
       dpd,

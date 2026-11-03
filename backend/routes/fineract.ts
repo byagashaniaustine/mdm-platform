@@ -30,6 +30,7 @@ function coerceLoanOverride(raw: unknown, loanId: string): FineractLoanSummary |
     accountNo: String(r.accountNo ?? ""),
     clientId: r.clientId == null ? null : String(r.clientId),
     clientName: r.clientName == null ? null : String(r.clientName),
+    clientEmail: r.clientEmail == null ? null : String(r.clientEmail),
     productId: Number(r.productId ?? 0),
     productName: r.productName == null ? null : String(r.productName),
     status: LOAN_STATUSES.has(status) ? status : "active",

@@ -15,6 +15,7 @@ export interface FineractLoanSummary {
   accountNo: string;
   clientId: string | null;
   clientName: string | null;
+  clientEmail: string | null;       // optional debtor contact; feeds the reminder-email flow (apply.ts)
   productId: number;
   productName: string | null;
   status: "active" | "closed" | "written_off" | "overpaid" | "pending" | "approved" | "rejected" | "unknown";
@@ -151,6 +152,7 @@ export async function getLoan(loanId: string, todayISO: string): Promise<Finerac
       accountNo: String(raw.accountNo ?? ""),
       clientId: raw.clientId != null ? String(raw.clientId) : null,
       clientName: raw.clientName as string | null ?? null,
+      clientEmail: (raw.clientEmail as string | null) ?? null,
       productId: Number(raw.loanProductId ?? 0),
       productName: raw.loanProductName as string | null ?? null,
       status: statusFrom(raw.status),
