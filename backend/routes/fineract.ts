@@ -8,9 +8,33 @@ import { log } from "../lib/log.ts";
 import { onEvent, onLoanEvent, resolveLoanToEnterprise } from "../services/bridge/automation.ts";
 import type { FineractLoanSummary } from "../services/bridge/fineract.ts";
 
-const TIGHTENING_ACTIONS = new Set(["WRITEOFF", "REJECT"]);
-const RELEASE_ACTIONS   = new Set(["REPAYMENT", "CLOSE", "UNDOWRITEOFF"]);
-const DISBURSE_ACTIONS  = new Set(["DISBURSE", "DISBURSAL"]);
+// Fineract hook actionName enum values. Mifos emits UPPERCASE imperative
+// verbs; aliases exist across versions + UIs (Community vs Enterprise). We
+// classify them into three device-side intents: disburse (device activates),
+// release (loan is done, device returns to released), tighten (loan is in
+// trouble, device moves toward locked). Pre-disburse states (APPROVE,
+// UNDOAPPROVAL) and purely-informational edits (UPDATE, ADJUSTTRANSACTION)
+// stay in "other" — the current loan state from getLoan() still drives the
+// real tier decision in reconcileBatch regardless of this hint.
+const DISBURSE_ACTIONS = new Set([
+  "DISBURSE",             // standard
+  "DISBURSAL",            // older Fineract alias
+  "DISBURSETOSAVINGS",    // disburse to a linked savings account
+]);
+const RELEASE_ACTIONS = new Set([
+  "REPAYMENT",            // standard
+  "MAKEREPAYMENT",        // Mifos Community UI
+  "MAKEREPAYMENTS",       // bulk repayment
+  "RECOVERYPAYMENT",      // payment after writeoff
+  "CLOSE",                // loan closed
+  "CLOSEASRESCHEDULED",   // closed because rescheduled
+  "UNDOWRITEOFF",         // reversing a writeoff
+]);
+const TIGHTENING_ACTIONS = new Set([
+  "WRITEOFF",             // lender takes the loss
+  "REJECT",               // application rejected
+  "UNDODISBURSAL",        // reversing a disbursal → device back toward undisbursed
+]);
 const LOAN_STATUSES = new Set<FineractLoanSummary["status"]>([
   "active", "closed", "written_off", "overpaid", "pending", "approved", "rejected", "unknown",
 ]);
