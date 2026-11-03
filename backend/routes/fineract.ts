@@ -6,7 +6,8 @@ import { Hono } from "hono";
 import { getConfig } from "../config.ts";
 import { log } from "../lib/log.ts";
 import { onEvent, onLoanEvent, resolveLoanToEnterprise } from "../services/bridge/automation.ts";
-import type { FineractLoanSummary } from "../services/bridge/fineract.ts";
+import { todayDarISO } from "../services/bridge/automation.ts";
+import { getClient, getLoan, listLoans, type FineractLoanSummary } from "../services/bridge/fineract.ts";
 
 const TIGHTENING_ACTIONS = new Set(["WRITEOFF", "REJECT"]);
 const RELEASE_ACTIONS   = new Set(["REPAYMENT", "CLOSE", "UNDOWRITEOFF"]);
@@ -124,6 +125,46 @@ export function fineractWebhookRoutes() {
       // Still 200 so Fineract doesn't flood retries; the error is in our logs.
       log("warn", "fineract.webhook_apply_failed", { loan_id: loanId, source, error: String(e) });
       return c.json({ data: { trigger, kind, source, error: "processing_failed" } });
+    }
+  });
+
+  // ---- Fineract read proxy for the sim (PR 2 of the integration work). ----
+  // Not session-gated — the sim is a trusted process (holds the service-role
+  // key) that shouldn't carry Fineract credentials. Instead we require a
+  // shared SIM_PROXY_SECRET header, matching the sim-callback pattern.
+  const requireSimProxy = (c: import("hono").Context): string | null => {
+    const expected = getConfig().simProxySecret;
+    if (!expected) return "SIM_PROXY_SECRET not configured on this server";
+    const sig = c.req.header("X-Sim-Proxy-Secret") ?? c.req.header("x-sim-proxy-secret") ?? "";
+    if (sig !== expected) return "Invalid sim-proxy secret";
+    return null;
+  };
+
+  r.get("/loans", async (c) => {
+    const err = requireSimProxy(c);
+    if (err) return c.json({ error: { code: "AUTH_REQUIRED", message: err } }, 401);
+    const active = c.req.query("status") !== "all";
+    const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 100)));
+    try {
+      const loans = await listLoans({ active, limit });
+      return c.json({ data: { loans } });
+    } catch (e) {
+      log("warn", "fineract.proxy_list_failed", { error: String(e) });
+      return c.json({ error: { code: "FINERACT_UNAVAILABLE", message: "Could not list Fineract loans." } }, 502);
+    }
+  });
+
+  r.get("/loans/:id", async (c) => {
+    const err = requireSimProxy(c);
+    if (err) return c.json({ error: { code: "AUTH_REQUIRED", message: err } }, 401);
+    const id = c.req.param("id");
+    try {
+      const loan = await getLoan(id, todayDarISO());
+      const client = loan.clientId ? await getClient(loan.clientId) : null;
+      return c.json({ data: { loan, client } });
+    } catch (e) {
+      log("warn", "fineract.proxy_get_failed", { id, error: String(e) });
+      return c.json({ error: { code: "FINERACT_NOT_FOUND", message: "Loan not found or unreachable." } }, 404);
     }
   });
 
