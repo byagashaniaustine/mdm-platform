@@ -433,4 +433,37 @@ setUnauthorizedHandler(() => {
 });
 window.addEventListener("hashchange", render);
 setInterval(refreshCounts, 60_000);
+
+// Near-realtime activity poll (PR 4). Every 5s asks "did anything change on
+// apply_jobs or device_tier_state since <ts>?". On a hit, bumps refreshCounts
+// and dispatches a `mdm-activity` event so views can self-refresh (e.g., the
+// overview view listens and re-fetches its slice). Session-gated so it only
+// runs after sign-in; pauses when the tab is hidden to save polls.
+let lastActivityTs = new Date().toISOString();
+async function pollActivity() {
+  if (!ctx.me || document.hidden) return;
+  try {
+    const res = await get(`/api/activity/since?ts=${encodeURIComponent(lastActivityTs)}`);
+    if (res?.has_changes) {
+      lastActivityTs = res.max_updated_at ?? lastActivityTs;
+      refreshCounts();
+      window.dispatchEvent(new CustomEvent("mdm-activity", { detail: res }));
+    } else if (res?.max_updated_at) {
+      lastActivityTs = res.max_updated_at;
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+setInterval(pollActivity, 5_000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollActivity(); });
+
+// On a real activity hit, re-render tier/apply-sensitive views in-place. The
+// other views already re-fetch on mount so no need; we skip them to avoid
+// yanking scroll position mid-browse.
+const LIVE_VIEWS = new Set(["overview", "activity", "devices"]);
+window.addEventListener("mdm-activity", () => {
+  if (LIVE_VIEWS.has(currentRoute().name)) render();
+});
+
 boot();

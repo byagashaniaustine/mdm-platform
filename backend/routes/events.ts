@@ -76,6 +76,35 @@ export function overviewRoutes() {
     return c.json({ data });
   });
 
+  // Lightweight activity probe — "did anything change since <ts>?". Called by
+  // the frontend every ~5s to decide whether to re-fetch the overview without
+  // the cost of a full /overview roundtrip. Replaces what Supabase Realtime
+  // would do if the frontend had Supabase Auth wired. PR 4.
+  r.get("/activity/since", async (c) => {
+    const eid = c.get("session").enterpriseId;
+    const sinceParam = c.req.query("ts") ?? "";
+    const since = sinceParam && !Number.isNaN(Date.parse(sinceParam)) ? sinceParam : new Date(Date.now() - 60_000).toISOString();
+    const [applyJobs, tierState] = await Promise.all([
+      db().from("apply_jobs").select("updated_at", { count: "exact", head: false })
+        .eq("enterprise_id", eid).gt("updated_at", since).order("updated_at", { ascending: false }).limit(1),
+      db().from("device_tier_state").select("updated_at", { count: "exact", head: false })
+        .eq("enterprise_id", eid).gt("updated_at", since).order("updated_at", { ascending: false }).limit(1),
+    ]);
+    const rows = [
+      ...(applyJobs.data ?? []),
+      ...(tierState.data ?? []),
+    ];
+    const maxUpdatedAt = rows.length
+      ? rows.map((r) => String(r.updated_at)).sort().slice(-1)[0]
+      : since;
+    return c.json({ data: {
+      has_changes: rows.length > 0,
+      max_updated_at: maxUpdatedAt,
+      apply_jobs: applyJobs.count ?? 0,
+      device_tier_state: tierState.count ?? 0,
+    } });
+  });
+
   r.get("/sync-runs", async (c) => {
     const data = await run(
       db().from("sync_runs").select("*").eq("enterprise_id", c.get("session").enterpriseId)
