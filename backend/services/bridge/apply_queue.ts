@@ -22,6 +22,7 @@ import { applyOneDecision, stampObserved, type ApplyOutcome } from "./apply.ts";
 import { loadPlan } from "./policy.ts";
 import type { DeviceDecision } from "./reconcile.ts";
 import { enqueueSimCallback } from "../sim_callbacks.ts";
+import { markGroupHot } from "../group_sync_hints.ts";
 import { syncGroupMembership } from "../sync.ts";
 
 export type JobState = "pending" | "in_progress" | "applied" | "failed" | "dead";
@@ -78,6 +79,24 @@ export async function enqueueDecisions(
     db().from("apply_jobs").insert(rows).select("id, device_id, loan_id"),
   );
   log("info", "apply_queue.enqueued", { enterprise_id: enterpriseId, trigger, count: inserted.length });
+
+  // Mark every tier group in the plan as hot so the worker's hot-drain picks
+  // them up on a 60s cadence (vs. the 15-min full sweep). Covers the window
+  // where the user is actively watching the UI for a loan event they just
+  // fired. We mark the whole set rather than just the targets so cross-tier
+  // moves (remove + add) stay fresh too.
+  try {
+    const plan = await loadPlan(enterpriseId);
+    const tierGroupIds = [...new Set([...plan.values()].map((p) => p.targetGroupRowId))];
+    for (const gid of tierGroupIds) {
+      markGroupHot(enterpriseId, gid).catch((e) =>
+        log("warn", "apply_queue.mark_hot_failed", { enterprise_id: enterpriseId, group_id: gid, error: String(e) })
+      );
+    }
+  } catch (e) {
+    log("warn", "apply_queue.plan_load_failed", { enterprise_id: enterpriseId, error: String(e) });
+  }
+
   return inserted;
 }
 

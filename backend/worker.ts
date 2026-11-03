@@ -16,6 +16,7 @@ import { syncEnterprise } from "./services/sync.ts";
 import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
 import { drainApplyQueue } from "./services/bridge/apply_queue.ts";
 import { drainSimCallbacks } from "./services/sim_callbacks.ts";
+import { drainHotGroupSyncs, purgeExpiredHints } from "./services/group_sync_hints.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
 import { pollEnterpriseLocations } from "./services/locations.ts";
 import "./services/groups.ts";
@@ -73,6 +74,17 @@ export async function tick(): Promise<void> {
       if (sim.delivered || sim.failed) log("info", "sim_callback.drained", sim);
     } catch (e) {
       log("warn", "sim_callback.drain_failed", { error: String(e) });
+    }
+
+    // Reactive hot-group sync (migration 019, PR 5). ME MDM has no outbound
+    // event API; this re-reads groups the automation just touched on a 60s
+    // cadence so the UI reflects Zoho reality faster than the 15-min full
+    // sweep. Bounded at 10 syncs/tick to protect Zoho API quota.
+    try {
+      const hot = await drainHotGroupSyncs();
+      if (hot.synced || hot.skipped) log("info", "group_sync_hints.drained", hot);
+    } catch (e) {
+      log("warn", "group_sync_hints.drain_failed", { error: String(e) });
     }
 
     for (let i = 0; i < 20; i++) {
@@ -159,6 +171,12 @@ export async function monitoringTick(scanEveryMinutes: number) {
     await writeTs("last_purge_at", Date.now());
     const { data } = await db().rpc("purge_old_locations");
     if (data) log("info", "worker.locations_purged", { count: data });
+    try {
+      const purgedHints = await purgeExpiredHints();
+      if (purgedHints) log("info", "worker.group_sync_hints_purged", { count: purgedHints });
+    } catch (e) {
+      log("warn", "worker.group_sync_hints_purge_failed", { error: String(e) });
+    }
   }
 }
 
