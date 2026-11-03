@@ -5,10 +5,10 @@
 //     cadence. Reconciles every active loan link for the enterprise.
 // Both run under withLease so a scaled-out deployment never double-processes an
 // enterprise. See LOAN_DEVICE_AUTOMATION.md §9 (triggers) and §10 (apply path).
-import { db, run } from "../../lib/db.ts";
+import { db, run, runMaybe } from "../../lib/db.ts";
 import { withLease } from "../../lib/lease.ts";
 import { log } from "../../lib/log.ts";
-import { getLoan, type FineractLoanSummary } from "./fineract.ts";
+import { getClient, getLoan, type FineractLoanSummary } from "./fineract.ts";
 import { reconcileBatch, type ReconcileBatchResult } from "./reconcile.ts";
 
 /**
@@ -58,14 +58,87 @@ export async function dailyTickAll(): Promise<void> {
 }
 
 /** Resolve a Fineract loan to its linked device so the webhook can target reconcile. */
-export async function resolveLoanToEnterprise(fineractLoanId: string): Promise<{ enterpriseId: string } | null> {
-  const row = await run<Array<{ enterprise_id: string }>>(
-    db().from("loan_links").select("enterprise_id").eq("fineract_loan_id", fineractLoanId).eq("status", "active").limit(1),
+export async function resolveLoanToEnterprise(fineractLoanId: string): Promise<{ enterpriseId: string; deviceId: string } | null> {
+  const row = await run<Array<{ enterprise_id: string; device_id: string }>>(
+    db().from("loan_links").select("enterprise_id, device_id").eq("fineract_loan_id", fineractLoanId).eq("status", "active").limit(1),
   );
-  return row.length ? { enterpriseId: row[0].enterprise_id } : null;
+  return row.length ? { enterpriseId: row[0].enterprise_id, deviceId: row[0].device_id } : null;
 }
 
-/** Convenience for the webhook: fetch the loan once, then reconcile the single-device batch. */
+/**
+ * Keep the loan_links row in sync with the Fineract source of truth. Called
+ * on every webhook so client_name / client_email / due_on / status reflect
+ * reality — then fireReminderEmail can prefer loan_links.client_email over the
+ * device-user fallback. Matches on the partial unique index
+ * (enterprise_id, fineract_loan_id) WHERE status='active' from migration 021.
+ */
+export async function upsertLoanLink(
+  enterpriseId: string,
+  deviceId: string,
+  loan: FineractLoanSummary,
+): Promise<void> {
+  // Email fallback chain: inline on the loan response, then /clients/{id},
+  // else leave null. Current client row may not have fetched email yet.
+  let clientEmail = loan.clientEmail;
+  let clientName = loan.clientName;
+  if (!clientEmail && loan.clientId) {
+    const c = await getClient(loan.clientId);
+    if (c) {
+      clientEmail = c.emailAddress ?? null;
+      clientName = clientName ?? c.displayName ?? null;
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const status = loan.status === "closed" || loan.status === "written_off" ? "closed" : "active";
+  const closedOn = status === "closed" ? todayDarISO() : null;
+
+  // Try update first (preserves created_at + status=closed history rows). If
+  // nothing matched, insert. We can't use .upsert() because the unique index
+  // is partial (WHERE status='active'); supabase doesn't honor partial-index
+  // conflict targets reliably across versions.
+  const existing = await runMaybe<{ id: string }>(
+    db().from("loan_links").select("id")
+      .eq("enterprise_id", enterpriseId)
+      .eq("fineract_loan_id", loan.loanId)
+      .eq("status", "active")
+      .maybeSingle(),
+  );
+  if (existing) {
+    await run(db().from("loan_links").update({
+      device_id: deviceId,
+      fineract_client_id: loan.clientId ?? null,
+      external_id: loan.externalId ?? null,
+      product_id: loan.productId,
+      disbursed_on: loan.disbursedOn ?? null,
+      due_on: loan.dueOn ?? null,
+      status,
+      closed_on: closedOn,
+      client_name: clientName ?? null,
+      client_email: clientEmail ?? null,
+    }).eq("id", existing.id));
+  } else {
+    await run(db().from("loan_links").insert({
+      enterprise_id: enterpriseId,
+      device_id: deviceId,
+      fineract_loan_id: loan.loanId,
+      fineract_client_id: loan.clientId ?? null,
+      external_id: loan.externalId ?? null,
+      product_id: loan.productId,
+      disbursed_on: loan.disbursedOn ?? null,
+      due_on: loan.dueOn ?? null,
+      status,
+      closed_on: closedOn,
+      client_name: clientName ?? null,
+      client_email: clientEmail ?? null,
+    }));
+    log("info", "automation.loan_link_created", { enterprise_id: enterpriseId, device_id: deviceId, fineract_loan_id: loan.loanId });
+  }
+  // Suppress unused-var warning on nowIso in this branch; kept for future audit timestamp.
+  void nowIso;
+}
+
+/** Convenience for the webhook: fetch the loan once, enrich the link, then reconcile. */
 export async function onLoanEvent(fineractLoanId: string, trigger: string): Promise<ReconcileBatchResult | null> {
   const resolved = await resolveLoanToEnterprise(fineractLoanId);
   if (!resolved) {
@@ -78,6 +151,12 @@ export async function onLoanEvent(fineractLoanId: string, trigger: string): Prom
     loan = await getLoan(fineractLoanId, today);
   } catch (e) {
     log("warn", "automation.loan_fetch_failed_webhook", { fineract_loan_id: fineractLoanId, error: String(e) });
+  }
+  // Enrich on every event so a late-arriving email or a Fineract-side edit
+  // to the client propagates to loan_links on the next webhook.
+  if (loan) {
+    try { await upsertLoanLink(resolved.enterpriseId, resolved.deviceId, loan); }
+    catch (e) { log("warn", "automation.loan_link_upsert_failed", { fineract_loan_id: fineractLoanId, error: String(e) }); }
   }
   return await onEvent(resolved.enterpriseId, trigger, loan);
 }

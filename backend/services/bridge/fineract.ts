@@ -183,6 +183,43 @@ export async function listLoans(opts: { active?: boolean; limit?: number } = {})
   }, { countFailure: isNetworkFailure });
 }
 
+export interface FineractClient {
+  id: string;
+  displayName: string | null;
+  emailAddress: string | null;
+  mobileNo: string | null;
+}
+
+/**
+ * Full client detail — name + email + mobile. Used by the webhook-time
+ * enrichment pass to backfill loan_links.client_email when the loan response
+ * didn't inline it. Fineract's schema varies by version; we accept several
+ * likely field names and coerce them.
+ */
+export async function getClient(clientId: string): Promise<FineractClient | null> {
+  try {
+    const raw = await withBreaker(BREAKER, async () =>
+      await req<Record<string, unknown>>(`/clients/${encodeURIComponent(clientId)}`),
+      { countFailure: isNetworkFailure },
+    );
+    const email = (raw.emailAddress as string | undefined)
+      ?? (raw.email as string | undefined)
+      ?? (raw.email_address as string | undefined)
+      ?? null;
+    const name = (raw.displayName as string | undefined)
+      ?? (raw.fullname as string | undefined)
+      ?? ([raw.firstname, raw.lastname].filter(Boolean).join(" ") || null);
+    const mobile = (raw.mobileNo as string | undefined)
+      ?? (raw.mobile_no as string | undefined)
+      ?? null;
+    return { id: String(raw.id ?? clientId), displayName: name, emailAddress: email, mobileNo: mobile };
+  } catch (e) {
+    if (toAppError(e).code === "FINERACT_NOT_FOUND") return null;
+    log("warn", "fineract.client_fetch_failed", { client_id: clientId, error: String(e) });
+    return null;
+  }
+}
+
 /** Lookup by externalId (the device serial/IMEI stamped on the loan). */
 export async function loanByExternalId(externalId: string, todayISO: string): Promise<FineractLoanSummary | null> {
   try {
