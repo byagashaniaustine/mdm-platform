@@ -12,11 +12,14 @@ export type Config = Readonly<{
   zohoClientSecret: string;
   zohoRedirectUri: string;
   zohoScopes: string;
-  mailProvider: "console" | "resend" | "zeptomail";
+  mailProvider: "console" | "resend" | "zeptomail" | "sendgrid";
   zeptomailToken: string;
   zeptomailUrl: string;
   resendApiKey: string;
+  sendgridApiKey: string;
   mailFrom: string;
+  mailTestRedirect: boolean;   // Resend test mode: reroute all mail to one allowed address
+  mailTestRedirectTo: string;  // optional override; empty = use the DB owner email
   sessionTtlHours: number;
   otpTtlMinutes: number;
   confirmTtlMinutes: number;
@@ -35,6 +38,13 @@ export type Config = Readonly<{
   fineractPassword: string;
   fineractWebhookSecret: string;        // HMAC fallback when per-enterprise automation_settings.webhook_secret_enc isn't set
   automationTickMinutes: number;        // daily tick cadence (default 60 = hourly reconcile, cheaper than one-shot per day for Phase 0)
+  // --- Sim callback (PR 3) ---
+  // After each apply_jobs terminal transition, HMAC-signed POST to the LMS sim
+  // so its in-memory tier view matches reality. If either is blank, the drain
+  // logs a warning once at startup and skips delivery (rows accumulate until
+  // configured).
+  simCallbackUrl: string;
+  simCallbackSecret: string;
 }>;
 
 const DEFAULT_SCOPES = [
@@ -77,11 +87,17 @@ export function getConfig(): Config {
     zohoClientSecret: env("ZOHO_CLIENT_SECRET", ""),
     zohoRedirectUri: env("ZOHO_REDIRECT_URI", `${appUrl}/api/zoho/callback`),
     zohoScopes: env("ZOHO_SCOPES", DEFAULT_SCOPES),
-    mailProvider: (["resend", "zeptomail"].includes(env("MAIL_PROVIDER", "console")) ? env("MAIL_PROVIDER") : "console") as Config["mailProvider"],
+    mailProvider: (["resend", "zeptomail", "sendgrid"].includes(env("MAIL_PROVIDER", "console")) ? env("MAIL_PROVIDER") : "console") as Config["mailProvider"],
     zeptomailToken: env("ZEPTOMAIL_TOKEN", ""),
     zeptomailUrl: env("ZEPTOMAIL_URL", "https://zeptomail.zoho.com/v1.1/email"),
     resendApiKey: env("RESEND_API_KEY", ""),
+    sendgridApiKey: env("SENDGRID_API_KEY", ""),
     mailFrom: env("MAIL_FROM", "MDM Console <no-reply@example.com>"),
+    // Resend's testing domain (onboarding@resend.dev) only delivers to the account owner,
+    // so without a verified domain we reroute every message to one allowed inbox. Auto-on when
+    // the from-address is the resend.dev test sender; force with MAIL_TEST_REDIRECT=true/false.
+    mailTestRedirect: (env("MAIL_TEST_REDIRECT", "") || (/resend\.dev/.test(env("MAIL_FROM", "")) ? "true" : "false")) === "true",
+    mailTestRedirectTo: env("MAIL_TEST_REDIRECT_TO", ""),
     sessionTtlHours: num("SESSION_TTL_HOURS", 12),
     otpTtlMinutes: num("OTP_TTL_MINUTES", 10),
     confirmTtlMinutes: num("CONFIRM_TTL_MINUTES", 10),
@@ -98,6 +114,8 @@ export function getConfig(): Config {
     // 30 min keeps DPD-driven transitions within the same business hour as the
     // DPD rollover; 60 was Phase 0's conservative default.
     automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 30),
+    simCallbackUrl: env("SIM_CALLBACK_URL", "").replace(/\/$/, ""),
+    simCallbackSecret: env("SIM_CALLBACK_SECRET", ""),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");

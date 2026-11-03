@@ -15,6 +15,7 @@ import { pollCommandStatus } from "./services/commands.ts";
 import { syncEnterprise } from "./services/sync.ts";
 import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
 import { drainApplyQueue } from "./services/bridge/apply_queue.ts";
+import { drainSimCallbacks } from "./services/sim_callbacks.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
 import { pollEnterpriseLocations } from "./services/locations.ts";
 import "./services/groups.ts";
@@ -62,6 +63,16 @@ export async function tick(): Promise<void> {
       if (drained.processed) log("info", "apply_queue.drained", drained);
     } catch (e) {
       log("warn", "apply_queue.drain_failed", { error: String(e) });
+    }
+
+    // Drain sim callbacks (migration 018). apply_queue enqueues one per
+    // terminal transition; delivery is HMAC-signed to the sim's
+    // /api/mdm/callback. Logs only when something happened.
+    try {
+      const sim = await drainSimCallbacks();
+      if (sim.delivered || sim.failed) log("info", "sim_callback.drained", sim);
+    } catch (e) {
+      log("warn", "sim_callback.drain_failed", { error: String(e) });
     }
 
     for (let i = 0; i < 20; i++) {

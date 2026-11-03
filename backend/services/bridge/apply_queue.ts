@@ -21,6 +21,7 @@ import { log } from "../../lib/log.ts";
 import { applyOneDecision, stampObserved, type ApplyOutcome } from "./apply.ts";
 import { loadPlan } from "./policy.ts";
 import type { DeviceDecision } from "./reconcile.ts";
+import { enqueueSimCallback } from "../sim_callbacks.ts";
 import { syncGroupMembership } from "../sync.ts";
 
 export type JobState = "pending" | "in_progress" | "applied" | "failed" | "dead";
@@ -183,6 +184,25 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
     log(terminalState === "dead" ? "warn" : "info", `apply_queue.${terminalState}`, {
       job_id: job.id, moved: outcome.moved, announced: outcome.announcementSent, error_code: outcome.error?.code,
     });
+
+    // Notify the sim. Fire-and-forget: enqueueSimCallback just writes a row;
+    // actual delivery happens in the worker's drainSimCallbacks pass.
+    try {
+      await enqueueSimCallback({
+        apply_job_id: job.id,
+        enterprise_id: job.enterprise_id,
+        device_id: job.device_id,
+        loan_id: job.loan_id,
+        final_tier: terminalState === "applied" ? outcome.to : null,
+        intended_tier: outcome.to,
+        state: terminalState,
+        error_code: outcome.error?.code ?? null,
+        error_message: outcome.error?.message ?? null,
+        completed_at: nowIso,
+      });
+    } catch (e) {
+      log("warn", "apply_queue.sim_callback_enqueue_failed", { job_id: job.id, error: String(e) });
+    }
   } catch (e) {
     const err = e as { code?: string; message?: string };
     const nextAttempt = job.attempts + 1;
@@ -209,6 +229,25 @@ export async function processApplyJob(job: ApplyJobRow): Promise<void> {
       completed_at: exhausted ? nowIso : null,
     }).eq("id", job.id));
     log("warn", "apply_queue.failed", { job_id: job.id, state, attempts: nextAttempt, error: err.code ?? err.message });
+
+    if (exhausted) {
+      try {
+        await enqueueSimCallback({
+          apply_job_id: job.id,
+          enterprise_id: job.enterprise_id,
+          device_id: job.device_id,
+          loan_id: job.loan_id,
+          final_tier: null,
+          intended_tier: (job.decision as { to?: string | null })?.to ?? null,
+          state: "dead",
+          error_code: err.code ?? "APPLY_FAILED",
+          error_message: (err.message ?? String(e)).slice(0, 500),
+          completed_at: nowIso,
+        });
+      } catch (ee) {
+        log("warn", "apply_queue.sim_callback_enqueue_failed", { job_id: job.id, error: String(ee) });
+      }
+    }
   }
 }
 
