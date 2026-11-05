@@ -75,10 +75,10 @@ export async function listAvailableDevices(enterpriseId: string): Promise<Availa
   const rows = await run<Array<{
     id: string; platform: string; device_name: string | null; model: string | null;
     serial_number: string | null; imei: string | null;
-    assigned_user: Array<{ name: string | null; email: string | null }> | null;
+    assigned_user: Array<{ user_name: string | null; email: string | null }> | null;
   }>>(
     db().from("devices")
-      .select("id, platform, device_name, model, serial_number, imei, assigned_user:mdm_users(name,email)")
+      .select("id, platform, device_name, model, serial_number, imei, assigned_user:mdm_users(user_name,email)")
       .eq("enterprise_id", enterpriseId).eq("is_removed", false),
   );
   const activeLoanDevices = await run<Array<{ device_id: string }>>(
@@ -94,7 +94,7 @@ export async function listAvailableDevices(enterpriseId: string): Promise<Availa
       model: r.model,
       serial_number: r.serial_number,
       imei: r.imei,
-      assigned_user_name: u?.name ?? null,
+      assigned_user_name: u?.user_name ?? null,
       assigned_user_email: u?.email ?? null,
     };
   });
