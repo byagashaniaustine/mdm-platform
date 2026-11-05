@@ -69,9 +69,19 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
   }
   log("warn", "fineract.request_failed", { path, status: res.status, body: text.slice(0, 200) });
-  if (res.status === 401 || res.status === 403) throw appError("FINERACT_UNAUTHORIZED");
+  if (res.status === 401) throw appError("FINERACT_UNAUTHORIZED");
   if (res.status === 404) throw appError("FINERACT_NOT_FOUND");
   if (res.status >= 500) throw appError("FINERACT_UNAVAILABLE");
+  // Fineract uses 403 for BOTH "no permission" AND "domain rule violation"
+  // (e.g., 'cannot modify loan in its current state'). The latter is a BAD
+  // REQUEST, not an auth problem — callers that catch UNAUTHORIZED to retry
+  // with fresh credentials would spin forever. Disambiguate by payload.
+  if (res.status === 403) {
+    if (text.includes("domain.rule.violation") || text.includes("validation.msg")) {
+      throw appError("FINERACT_BAD_REQUEST", `Fineract rejected the request: ${text.slice(0, 200)}`);
+    }
+    throw appError("FINERACT_UNAUTHORIZED");
+  }
   throw appError("FINERACT_BAD_REQUEST", `Fineract returned ${res.status}: ${text.slice(0, 200)}`);
 }
 
@@ -264,12 +274,33 @@ export async function listPendingDisbursal(limit = 500): Promise<FineractPending
   }, { countFailure: isNetworkFailure });
 }
 
-/** Set loan.externalId — editable while the loan is Submitted or Approved. */
+/**
+ * Set loan.externalId. CE 1.15 freezes the field once the loan is Approved —
+ * attempts throw FINERACT_BAD_REQUEST with "cannot modify loan in its current
+ * state". Harvey's auto-create-and-approve flow lands the loan at Approved
+ * before our Console ever sees it, so this is expected to fail in production.
+ * The caller treats it as best-effort and falls back to a loan note.
+ */
 export async function updateLoanExternalId(loanId: string, externalId: string): Promise<void> {
   await withBreaker(BREAKER, async () => {
     await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}`, {
       method: "PUT",
       body: JSON.stringify({ externalId, locale: "en" }),
+    });
+  }, { countFailure: isNetworkFailure });
+}
+
+/**
+ * Attach a human-readable note to the loan. Used as a Mapene-side visibility
+ * fallback when we can't stamp externalId: the note contains the device serial
+ * so an operator looking at the loan in Mapene can see which handset it was
+ * disbursed on. Notes are accepted in every loan state.
+ */
+export async function addLoanNote(loanId: string, note: string): Promise<void> {
+  await withBreaker(BREAKER, async () => {
+    await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
     });
   }, { countFailure: isNetworkFailure });
 }

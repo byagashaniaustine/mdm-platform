@@ -10,6 +10,7 @@ import { db, run } from "../lib/db.ts";
 import { appError, fail } from "../lib/errors.ts";
 import { log } from "../lib/log.ts";
 import {
+  addLoanNote,
   disburseLoan,
   type FineractPendingLoan,
   getClient,
@@ -17,6 +18,7 @@ import {
   listPendingDisbursal,
   updateLoanExternalId,
 } from "./bridge/fineract.ts";
+import { toAppError } from "../lib/errors.ts";
 import { todayDarISO } from "./bridge/automation.ts";
 
 export interface PendingLoanRow extends FineractPendingLoan {
@@ -144,13 +146,35 @@ export async function linkAndDisburse(
     fail("VALIDATION_FAILED", `Loan is in '${loan.status}' state; only 'approved' loans can be linked and disbursed.`);
   }
 
-  // Step 1: stamp externalId. If already set to the same value we skip the PUT.
+  // Step 1: best-effort externalId stamp. CE 1.15 freezes the field once the
+  // loan is Approved, which is exactly the state our Loans page operates on.
+  // The failure doesn't block us — the webhook finds the loan_links row we're
+  // about to insert via fineract_loan_id, no externalId required. We fall
+  // back to a loan note so Mapene operators still see the device binding.
+  let externalIdStamped = false;
   if (loan.externalId !== externalId) {
     try {
       await updateLoanExternalId(loanId, externalId!);
+      externalIdStamped = true;
     } catch (e) {
-      log("warn", "loans.set_external_id_failed", { loan_id: loanId, error: String(e) });
-      throw e;
+      const err = toAppError(e);
+      if (err.code === "FINERACT_BAD_REQUEST" || err.code === "FINERACT_UNAUTHORIZED") {
+        log("info", "loans.external_id_frozen_falling_back_to_note", { loan_id: loanId, code: err.code });
+      } else {
+        log("warn", "loans.set_external_id_failed", { loan_id: loanId, error: String(e) });
+        throw e;
+      }
+    }
+  } else {
+    externalIdStamped = true;
+  }
+  if (!externalIdStamped) {
+    try {
+      await addLoanNote(loanId, `Device bound by MDM Console. Serial: ${externalId}`);
+    } catch (e) {
+      // Even the note failed — degrade silently. The loan_links row + webhook
+      // handling below are what actually drive the device.
+      log("warn", "loans.add_note_failed", { loan_id: loanId, error: String(e) });
     }
   }
 
