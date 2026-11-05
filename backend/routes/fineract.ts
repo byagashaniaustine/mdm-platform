@@ -136,7 +136,15 @@ export async function handleFineractWebhook(c: any) {
     authed = timingSafeEq(urlKey, secret);
   }
   if (!authed) {
-    log("warn", "fineract.webhook_bad_auth", { had_sig: Boolean(sig), had_url_key: Boolean(urlKey) });
+    log("warn", "fineract.webhook_bad_auth", {
+      had_sig: Boolean(sig),
+      had_url_key: Boolean(urlKey),
+      url: c.req.url,
+      path: new URL(c.req.url).pathname,
+      query_keys: [...new URL(c.req.url).searchParams.keys()],
+      user_agent: c.req.header("user-agent") ?? "",
+      content_type: c.req.header("content-type") ?? "",
+    });
     return c.json({ error: { code: "AUTH_REQUIRED", message: "No valid X-Fineract-Signature header or ?key=<secret> query param." } }, 401);
   }
   let body: Record<string, unknown>;
