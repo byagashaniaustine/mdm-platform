@@ -3,6 +3,7 @@
 // unchanged), write one automation_runs row per batch. ZERO device-facing side
 // effects. See LOAN_DEVICE_AUTOMATION.md §10 and §19 (Phase 0 acceptance).
 import { db, run, runMaybe } from "../../lib/db.ts";
+import { toAppError } from "../../lib/errors.ts";
 import { log } from "../../lib/log.ts";
 import { applyBatch, type ApplyBatchResult } from "./apply.ts";
 import { enqueueDecisions } from "./apply_queue.ts";
@@ -144,7 +145,20 @@ export async function reconcileBatch(
       const got = await getLoan(l.fineract_loan_id, todayISO);
       loansById.set(l.fineract_loan_id, got);
     } catch (e) {
-      // Skip this link — a Fineract fetch failure must not take down the whole batch.
+      const err = toAppError(e);
+      // A hard 404 from Fineract means this loan no longer exists on the
+      // lender — the link is orphaned (e.g., sim-prefixed rows left over
+      // from the pre-Zoho-first era, or a loan deleted operationally).
+      // Close the row so future ticks stop polluting logs and the device's
+      // per-device active slot opens up for a real loan.
+      if (err.code === "FINERACT_NOT_FOUND") {
+        await db().from("loan_links").update({ status: "closed", closed_on: todayISO }).eq("id", l.id);
+        log("info", "automation.loan_link_orphaned_closed", {
+          enterprise_id: enterpriseId, loan_id: l.fineract_loan_id, link_id: l.id,
+        });
+        continue;
+      }
+      // Transient failures (5xx, timeouts, auth) stay active and get retried.
       log("warn", "automation.loan_fetch_failed", { enterprise_id: enterpriseId, loan_id: l.fineract_loan_id, error: String(e) });
     }
   }
