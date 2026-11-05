@@ -101,54 +101,106 @@ function timingSafeEq(a: string, b: string): boolean {
 // Shared Fineract webhook handler. Mounted at both /api/fineract/hooks and
 // POST / (root). The root mount exists because Fineract CE 1.15-SNAPSHOT 500s
 // on hook registration when the Payload URL contains any path segment —
-// confirmed on istore.lms.bsa.ai on 2026-11-05. Query strings are accepted, so
-// the Mifos UI registers the root URL with `?key=<secret>` and this app
-// catches it at /. Remove the root mount once Harvey patches the server bug.
+// confirmed on istore.lms.bsa.ai on 2026-11-05. Query strings are accepted at
+// registration time, so the hook is registered as `https://host?key=<secret>`.
 //
-// Two accepted auth modes, so this works both with Fineract builds that
-// HMAC-sign the body and with vanilla CE 1.x where the standard Web hook
-// template just POSTs the payload with no header:
+// Three accepted auth modes, tried in order:
 //   1. HMAC path: X-Fineract-Signature header carrying the hex HMAC-SHA256
-//      of the raw body under FINERACT_WEBHOOK_SECRET. Preferred when the
-//      Mifos build supports a signing extension.
-//   2. URL-param path: a `?key=<FINERACT_WEBHOOK_SECRET>` query string on
-//      the hook URL — the secret is URL-decoded by Hono. CE 1.x operators
-//      configure the hook URL in Mifos as
-//        https://.../?key=<url-encoded-secret>
-//      Compared constant-time; no header requirement.
+//      of the raw body under FINERACT_WEBHOOK_SECRET. Not produced by CE 1.x
+//      Web template, but kept for future signed deployments.
+//   2. URL-param path: a `?key=<FINERACT_WEBHOOK_SECRET>` query string.
+//      OkHttp 4.12 (CE 1.15's HTTP client) silently drops the query when the
+//      stored Payload URL has no `/` before `?` — which is the only shape
+//      that fits istore's varchar(100) config column. So this mode almost
+//      never triggers in prod right now, but will light up again once Harvey
+//      bumps the column size and we re-register as `https://host/?key=...`.
+//   3. IP-source + body-shape trust: if the request comes from an IP in
+//      FINERACT_WEBHOOK_ALLOWED_IPS AND the body is a Fineract-shaped event
+//      (entityName=LOAN with a non-empty resourceId/loanId), accept. This is
+//      the only mode that actually works with CE 1.15 + OkHttp 4.12 today.
+//      Logged loudly as fineract.webhook_accepted_by_ip so we can drop this
+//      fallback the moment one of the cryptographic modes starts delivering.
+const FINERACT_LOAN_ACTIONS = new Set<string>([
+  ...DISBURSE_ACTIONS, ...RELEASE_ACTIONS, ...TIGHTENING_ACTIONS,
+  "APPROVE", "APPROVALUNDO", "REJECT", "WITHDRAW",
+  "ADJUSTTRANSACTION", "ADJUST", "UPDATE", "CREATE",
+]);
+
+function clientIpFromHeaders(c: { req: { header: (n: string) => string | undefined } }): string {
+  // Deno Deploy sets x-forwarded-for with the real client first. Fall back to
+  // x-real-ip for other proxies. Return "" if nothing is readable.
+  const xff = c.req.header("x-forwarded-for") ?? "";
+  const first = xff.split(",")[0]?.trim();
+  if (first) return first;
+  return (c.req.header("x-real-ip") ?? "").trim();
+}
+
+function looksLikeFineractEvent(body: Record<string, unknown>): boolean {
+  const entity = String(body.entityName ?? body.entity ?? "").toUpperCase();
+  const action = String(body.actionName ?? body.action ?? "").toUpperCase();
+  const resource = String(body.resourceId ?? body.resource_id ?? body.loanId ?? "");
+  // We only trust LOAN events — any other entity from an "allowed" IP is still
+  // rejected so a compromised network path can't fire arbitrary automation.
+  return entity === "LOAN" && resource.length > 0 && FINERACT_LOAN_ACTIONS.has(action);
+}
 // deno-lint-ignore no-explicit-any
 export async function handleFineractWebhook(c: any) {
-  const secret = getConfig().fineractWebhookSecret;
-  if (!secret) {
-    log("warn", "fineract.webhook_no_secret");
-    return c.json({ error: { code: "FINERACT_UNCONFIGURED", message: "Webhook secret not configured on this server." } }, 503);
-  }
+  const cfg = getConfig();
+  const secret = cfg.fineractWebhookSecret;
   const raw = await c.req.text();
   const sig = c.req.header("X-Fineract-Signature") ?? c.req.header("x-fineract-signature") ?? "";
   const urlKey = c.req.query("key") ?? "";
 
   let authed = false;
-  if (sig) {
+  let authMode: "hmac" | "url_key" | "ip" | "none" = "none";
+  if (secret && sig) {
     const expected = await hmacHex(secret, raw);
-    authed = timingSafeEq(sig.toLowerCase(), expected);
+    if (timingSafeEq(sig.toLowerCase(), expected)) { authed = true; authMode = "hmac"; }
   }
-  if (!authed && urlKey) {
-    authed = timingSafeEq(urlKey, secret);
+  if (!authed && secret && urlKey) {
+    if (timingSafeEq(urlKey, secret)) { authed = true; authMode = "url_key"; }
   }
+
+  // Parse the body up front — the IP-trust fallback needs to see the shape
+  // before deciding whether to accept.
+  let body: Record<string, unknown> = {};
+  let bodyParseOk = false;
+  if (raw) {
+    try { body = JSON.parse(raw); bodyParseOk = true; } catch { bodyParseOk = false; }
+  }
+
   if (!authed) {
-    log("warn", "fineract.webhook_bad_auth", {
-      had_sig: Boolean(sig),
-      had_url_key: Boolean(urlKey),
-      url: c.req.url,
-      path: new URL(c.req.url).pathname,
-      query_keys: [...new URL(c.req.url).searchParams.keys()],
-      user_agent: c.req.header("user-agent") ?? "",
-      content_type: c.req.header("content-type") ?? "",
-    });
-    return c.json({ error: { code: "AUTH_REQUIRED", message: "No valid X-Fineract-Signature header or ?key=<secret> query param." } }, 401);
+    const sourceIp = clientIpFromHeaders(c);
+    const ipAllowed = sourceIp && cfg.fineractWebhookAllowedIps.includes(sourceIp);
+    const shapeOk = bodyParseOk && looksLikeFineractEvent(body);
+    if (ipAllowed && shapeOk) {
+      authed = true;
+      authMode = "ip";
+      log("warn", "fineract.webhook_accepted_by_ip", {
+        source_ip: sourceIp,
+        entity: String(body.entityName ?? "").toUpperCase(),
+        action: String(body.actionName ?? "").toUpperCase(),
+        resource_id: String(body.resourceId ?? body.loanId ?? ""),
+        user_agent: c.req.header("user-agent") ?? "",
+      });
+    } else {
+      log("warn", "fineract.webhook_bad_auth", {
+        had_sig: Boolean(sig),
+        had_url_key: Boolean(urlKey),
+        source_ip: sourceIp,
+        ip_allowed: Boolean(ipAllowed),
+        body_shape_ok: shapeOk,
+        url: c.req.url,
+        path: new URL(c.req.url).pathname,
+        query_keys: [...new URL(c.req.url).searchParams.keys()],
+        user_agent: c.req.header("user-agent") ?? "",
+        content_type: c.req.header("content-type") ?? "",
+      });
+      return c.json({ error: { code: "AUTH_REQUIRED", message: "No valid signature, ?key=<secret>, or allowlisted source IP with Fineract-shaped body." } }, 401);
+    }
   }
-  let body: Record<string, unknown>;
-  try { body = JSON.parse(raw); } catch {
+
+  if (!bodyParseOk) {
     return c.json({ error: { code: "VALIDATION_FAILED", message: "Body is not JSON." } }, 400);
   }
   // Fineract's webhook body shape varies by version. Common fields:
@@ -170,7 +222,7 @@ export async function handleFineractWebhook(c: any) {
   // Real Fineract webhooks never carry this field — they take the fetch path.
   const override = coerceLoanOverride((body as Record<string, unknown>).loan, loanId);
   const source = override ? "override" : "fineract";
-  log("info", "fineract.webhook_received", { entity, action, loan_id: loanId, kind, source });
+  log("info", "fineract.webhook_received", { entity, action, loan_id: loanId, kind, source, auth_mode: authMode });
   try {
     let result;
     if (override) {

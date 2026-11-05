@@ -38,6 +38,12 @@ export type Config = Readonly<{
   fineractUsername: string;
   fineractPassword: string;
   fineractWebhookSecret: string;        // HMAC fallback when per-enterprise automation_settings.webhook_secret_enc isn't set
+  // Comma-separated allowlist of source IPs trusted to POST the Fineract
+  // webhook without a header/query secret. Fineract CE 1.15 (istore) 500s on
+  // path URLs and OkHttp drops query strings, so there is no way to deliver
+  // the secret in-band — IP-trust is the remaining option. Defaults to
+  // istore.lms.bsa.ai's resolved IP; override to add CI/staging sources.
+  fineractWebhookAllowedIps: readonly string[];
   automationTickMinutes: number;        // daily tick cadence (default 60 = hourly reconcile, cheaper than one-shot per day for Phase 0)
   // --- Sim callback (PR 3) ---
   // After each apply_jobs terminal transition, HMAC-signed POST to the LMS sim
@@ -110,9 +116,15 @@ export function getConfig(): Config {
     cookieSecure: env("COOKIE_SECURE", appEnv === "production" ? "true" : "false") === "true",
     fineractBaseUrl: env("FINERACT_BASE_URL", "").replace(/\/$/, ""),
     fineractTenantId: env("FINERACT_TENANT_ID", "default"),
-    fineractUsername: env("FINERACT_USERNAME", ""),
-    fineractPassword: env("FINERACT_PASSWORD", ""),
-    fineractWebhookSecret: env("FINERACT_WEBHOOK_SECRET", ""),
+    fineractUsername: env("FINERACT_USERNAME", "").trim(),
+    // Trim defensively: a trailing space on FINERACT_PASSWORD= in .env has caused
+    // 401s against istore more than once.
+    fineractPassword: env("FINERACT_PASSWORD", "").trim(),
+    fineractWebhookSecret: env("FINERACT_WEBHOOK_SECRET", "").trim(),
+    fineractWebhookAllowedIps: Object.freeze(
+      env("FINERACT_WEBHOOK_ALLOWED_IPS", "37.27.23.255")
+        .split(",").map((s) => s.trim()).filter(Boolean),
+    ),
     // 30 min keeps DPD-driven transitions within the same business hour as the
     // DPD rollover; 60 was Phase 0's conservative default.
     automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 30),
