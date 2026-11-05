@@ -40,8 +40,13 @@ async function hmacHex(key: string, msg: string): Promise<string> {
   return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Insert a callback row. Called by apply_queue after a terminal transition. */
+/** Insert a callback row. Called by apply_queue after a terminal transition.
+ * Skips the write when SIM_CALLBACK_URL is unset — the sim is decommissioned
+ * and the drain would never deliver the row anyway. Prevents the undelivered
+ * backlog from growing unbounded in production. */
 export async function enqueueSimCallback(payload: SimCallbackPayload): Promise<void> {
+  const cfg = getConfig();
+  if (!cfg.simCallbackUrl) return;
   await run(db().from("sim_callbacks").upsert({
     enterprise_id: payload.enterprise_id,
     apply_job_id: payload.apply_job_id,
