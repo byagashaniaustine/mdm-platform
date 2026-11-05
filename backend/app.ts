@@ -13,7 +13,7 @@ import { appRoutes, profileRoutes } from "./routes/profiles.ts";
 import { announcementRoutes } from "./routes/announcements.ts";
 import { eventRoutes, overviewRoutes } from "./routes/events.ts";
 import { alertRoutes, locationRoutes, monitoringRoutes } from "./routes/monitoring.ts";
-import { fineractWebhookRoutes } from "./routes/fineract.ts";
+import { fineractWebhookRoutes, handleFineractWebhook } from "./routes/fineract.ts";
 import { automationRoutes } from "./routes/automation.ts";
 import { applyJobRoutes } from "./routes/apply_jobs.ts";
 
@@ -86,6 +86,10 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   app.route("/api/alerts", alertRoutes());
   app.route("/api/locations", locationRoutes());
   app.route("/api/fineract", fineractWebhookRoutes());
+  // Root POST alias for the Fineract webhook: CE 1.15-SNAPSHOT 500s on hook
+  // registration when Payload URL has a path, but accepts root+query. See
+  // handleFineractWebhook for details.
+  app.post("/", handleFineractWebhook);
   app.route("/api/automation", automationRoutes());
   app.route("/api/apply-jobs", applyJobRoutes());
   app.route("/api", overviewRoutes());
