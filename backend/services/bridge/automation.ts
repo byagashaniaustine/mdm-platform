@@ -105,10 +105,15 @@ export async function upsertLoanLink(
       .maybeSingle(),
   );
   if (existing) {
-    await run(db().from("loan_links").update({
+    // Enrichment path: refresh the row with whatever Fineract returned, but
+    // NEVER overwrite external_id with null. external_id is NOT NULL in
+    // migration 012, and when the Console pre-created this row it stamped
+    // the device serial — Fineract may return null for externalId if the
+    // loan was auto-approved before we could PUT it, which is the common
+    // case. Preserve whatever the Console wrote.
+    const patch: Record<string, unknown> = {
       device_id: deviceId,
       fineract_client_id: loan.clientId ?? null,
-      external_id: loan.externalId ?? null,
       product_id: loan.productId,
       disbursed_on: loan.disbursedOn ?? null,
       due_on: loan.dueOn ?? null,
@@ -116,14 +121,28 @@ export async function upsertLoanLink(
       closed_on: closedOn,
       client_name: clientName ?? null,
       client_email: clientEmail ?? null,
-    }).eq("id", existing.id));
+    };
+    if (loan.externalId) patch.external_id = loan.externalId;
+    await run(db().from("loan_links").update(patch).eq("id", existing.id));
   } else {
+    // Auto-link happy path: webhook arrived for a loan we'd never seen, we
+    // matched a device via loan.externalId, insert the row now. If we got
+    // here with no externalId, the caller's auto-link logic is broken (it
+    // should have bailed to "unlinked" before calling us); swallow rather
+    // than crash the webhook — the resulting row would carry no device
+    // identity anyway.
+    if (!loan.externalId) {
+      log("warn", "automation.loan_link_insert_skipped_no_external_id", {
+        enterprise_id: enterpriseId, device_id: deviceId, fineract_loan_id: loan.loanId,
+      });
+      return;
+    }
     await run(db().from("loan_links").insert({
       enterprise_id: enterpriseId,
       device_id: deviceId,
       fineract_loan_id: loan.loanId,
       fineract_client_id: loan.clientId ?? null,
-      external_id: loan.externalId ?? null,
+      external_id: loan.externalId,
       product_id: loan.productId,
       disbursed_on: loan.disbursedOn ?? null,
       due_on: loan.dueOn ?? null,
