@@ -127,12 +127,22 @@ const FINERACT_LOAN_ACTIONS = new Set<string>([
 ]);
 
 function clientIpFromHeaders(c: { req: { header: (n: string) => string | undefined } }): string {
-  // Deno Deploy sets x-forwarded-for with the real client first. Fall back to
-  // x-real-ip for other proxies. Return "" if nothing is readable.
-  const xff = c.req.header("x-forwarded-for") ?? "";
-  const first = xff.split(",")[0]?.trim();
-  if (first) return first;
-  return (c.req.header("x-real-ip") ?? "").trim();
+  // Try each proxy-IP header in order. Deno Deploy, Cloudflare, Fastly and
+  // the generic Forwarded standard disagree on which one they set.
+  const tries = [
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "fly-client-ip",
+    "true-client-ip",
+    "x-client-ip",
+  ];
+  for (const name of tries) {
+    const v = c.req.header(name) ?? "";
+    const first = v.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return "";
 }
 
 function looksLikeFineractEvent(body: Record<string, unknown>): boolean {
@@ -184,17 +194,28 @@ export async function handleFineractWebhook(c: any) {
         user_agent: c.req.header("user-agent") ?? "",
       });
     } else {
+      // Temporary diagnostic: dump every request header + first 400 chars of
+      // body so we can see what Fineract/OkHttp is actually sending vs what
+      // our auth paths require. Scrub once diagnosed.
+      const allHeaders: Record<string, string> = {};
+      try {
+        // deno-lint-ignore no-explicit-any
+        const h = (c.req as any).raw?.headers as Headers | undefined;
+        if (h) for (const [k, v] of h.entries()) allHeaders[k] = v;
+      } catch { /* ignore */ }
       log("warn", "fineract.webhook_bad_auth", {
         had_sig: Boolean(sig),
         had_url_key: Boolean(urlKey),
         source_ip: sourceIp,
         ip_allowed: Boolean(ipAllowed),
         body_shape_ok: shapeOk,
+        body_parse_ok: bodyParseOk,
+        body_preview: raw.slice(0, 400),
+        body_keys: bodyParseOk ? Object.keys(body) : [],
         url: c.req.url,
         path: new URL(c.req.url).pathname,
         query_keys: [...new URL(c.req.url).searchParams.keys()],
-        user_agent: c.req.header("user-agent") ?? "",
-        content_type: c.req.header("content-type") ?? "",
+        headers: allHeaders,
       });
       return c.json({ error: { code: "AUTH_REQUIRED", message: "No valid signature, ?key=<secret>, or allowlisted source IP with Fineract-shaped body." } }, 401);
     }
