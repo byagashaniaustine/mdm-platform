@@ -9,6 +9,7 @@ import { activityView } from "./views/activity.js";
 import { settingsView } from "./views/settings.js";
 import { alertsView } from "./views/alerts.js";
 import { locationsView } from "./views/locations.js";
+import { loansView } from "./views/loans.js";
 
 const root = document.getElementById("app");
 const ctx = { me: null, shell: null };
@@ -16,7 +17,7 @@ const ctx = { me: null, shell: null };
 // Navigation grouped by what admins come to do.
 const SECTIONS = [
   { title: "Monitor", items: ["overview", "alerts", "locations"] },
-  { title: "Manage", items: ["devices", "groups", "profiles", "announcements"] },
+  { title: "Manage", items: ["devices", "groups", "profiles", "announcements", "loans"] },
   { title: "Records", items: ["activity", "settings"] },
 ];
 const ROUTES = {
@@ -27,6 +28,7 @@ const ROUTES = {
   groups: { label: "Groups", icon: "groups", view: groupsView, detail: groupDetailView },
   profiles: { label: "Profiles", icon: "profiles", view: profilesView },
   announcements: { label: "Announcements", icon: "announcements", view: announcementsView },
+  loans: { label: "Loans", icon: "loans", view: loansView },
   activity: { label: "Activity", icon: "activity", view: activityView },
   settings: { label: "Settings", icon: "settings", view: settingsView },
 };

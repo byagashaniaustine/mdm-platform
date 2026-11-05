@@ -319,6 +319,7 @@ const ICONS = {
   groups: ["M3 7h18v13H3z", "M3 7l2-3h6l2 3"],
   profiles: ["M4 3h12l4 4v14H4z", "M8 11h8", "M8 15h8", "M8 7h4"],
   announcements: ["M3 10v4h4l7 5V5L7 10z", "M18 9v6", "M21 7v10"],
+  loans: ["M3 7h18v12H3z", "M3 11h18", "M7 15h3", "M14 15h3"],
   activity: ["M3 12h4l3-8 4 16 3-8h4"],
   settings: ["M4 6h10", "M18 6h2", "M4 12h4", "M12 12h8", "M4 18h12", "M20 18h0", "M14 4v4", "M8 10v4", "M16 16v4"],
   search: ["M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15z", "M16 16l5 5"],

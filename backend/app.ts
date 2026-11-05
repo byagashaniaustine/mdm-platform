@@ -16,6 +16,7 @@ import { alertRoutes, locationRoutes, monitoringRoutes } from "./routes/monitori
 import { fineractWebhookRoutes, handleFineractWebhook } from "./routes/fineract.ts";
 import { automationRoutes } from "./routes/automation.ts";
 import { applyJobRoutes } from "./routes/apply_jobs.ts";
+import { loanRoutes } from "./routes/loans.ts";
 
 // Importing the services registers their executors.
 import "./services/commands.ts";
@@ -92,6 +93,7 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   app.post("/", handleFineractWebhook);
   app.route("/api/automation", automationRoutes());
   app.route("/api/apply-jobs", applyJobRoutes());
+  app.route("/api/loans", loanRoutes());
   app.route("/api", overviewRoutes());
 
   app.notFound((c) => (c.req.path.startsWith("/api")

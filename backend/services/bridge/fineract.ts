@@ -220,6 +220,75 @@ export async function getClient(clientId: string): Promise<FineractClient | null
   }
 }
 
+export interface FineractPendingLoan {
+  loanId: string;
+  accountNo: string;
+  clientId: string | null;
+  clientName: string | null;
+  productId: number;
+  productName: string | null;
+  principal: number;
+  approvedOn: string | null;              // YYYY-MM-DD
+  expectedDisbursementDate: string | null; // YYYY-MM-DD
+  externalId: string | null;              // may already be stamped; usually null at this stage
+}
+
+/**
+ * List loans in Fineract that are "Approved, awaiting disbursal" — the input
+ * set for the Console's Loans page. We filter client-side because Fineract CE's
+ * /loans endpoint takes no status query param.
+ */
+export async function listPendingDisbursal(limit = 500): Promise<FineractPendingLoan[]> {
+  return await withBreaker(BREAKER, async () => {
+    const data = await req<{ pageItems?: Array<Record<string, unknown>> }>(`/loans?limit=${limit}&offset=0`);
+    const items = data.pageItems ?? [];
+    const rows: FineractPendingLoan[] = [];
+    for (const it of items) {
+      const s = it.status as { waitingForDisbursal?: boolean } | undefined;
+      if (!s?.waitingForDisbursal) continue;
+      const timeline = (it.timeline ?? {}) as { approvedOnDate?: unknown; expectedDisbursementDate?: unknown };
+      rows.push({
+        loanId: String(it.id),
+        accountNo: String(it.accountNo ?? ""),
+        clientId: it.clientId != null ? String(it.clientId) : null,
+        clientName: (it.clientName as string | null) ?? null,
+        productId: Number(it.loanProductId ?? 0),
+        productName: (it.loanProductName as string | null) ?? null,
+        principal: Number(it.principal ?? it.approvedPrincipal ?? 0),
+        approvedOn: arrToDate(timeline.approvedOnDate),
+        expectedDisbursementDate: arrToDate(timeline.expectedDisbursementDate),
+        externalId: (it.externalId as string | null) || null,
+      });
+    }
+    return rows;
+  }, { countFailure: isNetworkFailure });
+}
+
+/** Set loan.externalId — editable while the loan is Submitted or Approved. */
+export async function updateLoanExternalId(loanId: string, externalId: string): Promise<void> {
+  await withBreaker(BREAKER, async () => {
+    await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ externalId, locale: "en" }),
+    });
+  }, { countFailure: isNetworkFailure });
+}
+
+/** Disburse an approved loan. Date must be today or earlier in Fineract's TZ. */
+export async function disburseLoan(loanId: string, amount: number, dateDMYY: string): Promise<void> {
+  await withBreaker(BREAKER, async () => {
+    await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?command=disburse`, {
+      method: "POST",
+      body: JSON.stringify({
+        actualDisbursementDate: dateDMYY,
+        transactionAmount: amount,
+        dateFormat: "dd MMMM yyyy",
+        locale: "en",
+      }),
+    });
+  }, { countFailure: isNetworkFailure });
+}
+
 /** Lookup by externalId (the device serial/IMEI stamped on the loan). */
 export async function loanByExternalId(externalId: string, todayISO: string): Promise<FineractLoanSummary | null> {
   try {
