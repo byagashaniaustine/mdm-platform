@@ -78,8 +78,12 @@ function coerceLoanOverride(raw: unknown, loanId: string): FineractLoanSummary |
     externalId: r.externalId == null ? null : String(r.externalId),
     disbursedOn: r.disbursedOn == null ? null : String(r.disbursedOn),
     dueOn: r.dueOn == null ? null : String(r.dueOn),
+    finalDueOn: r.finalDueOn == null ? null : String(r.finalDueOn),
     dpd: Math.max(0, Number(r.dpd ?? 0) || 0),
     totalOutstanding: Number(r.totalOutstanding ?? 0) || 0,
+    principalDisbursed: Number(r.principalDisbursed ?? 0) || 0,
+    totalRepaid: Number(r.totalRepaid ?? 0) || 0,
+    nextInstallmentAmount: Number(r.nextInstallmentAmount ?? 0) || 0,
   };
 }
 

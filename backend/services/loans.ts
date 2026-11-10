@@ -12,6 +12,8 @@ import { log } from "../lib/log.ts";
 import {
   addLoanNote,
   disburseLoan,
+  fetchRawLoan,
+  type FineractLoanSummary,
   type FineractPendingLoan,
   getClient,
   getLoan,
@@ -40,6 +42,36 @@ export interface AvailableDevice {
   imei: string | null;
   assigned_user_name: string | null;
   assigned_user_email: string | null;
+}
+
+/** One row on the Loan Tracking table — covers every state (pending, active, closed, written off). */
+export interface LoanTrackingRow {
+  loanId: string;
+  accountNo: string | null;
+  // One of: pending (approved, no device), active, overdue, closed, written_off, overpaid.
+  // The frontend turns this into the colored status tag.
+  trackingStatus: "pending" | "active" | "overdue" | "closed" | "written_off" | "overpaid" | "unknown";
+  dpd: number;                        // days past due; 0 unless overdue/written_off
+  clientName: string | null;
+  clientMobile: string | null;
+  clientEmail: string | null;
+  device: {
+    id: string;
+    name: string | null;
+    model: string | null;
+    imei: string | null;
+    serialNumber: string | null;
+    platform: string | null;
+  } | null;                           // null for pending (no device linked yet)
+  productName: string | null;
+  principalDisbursed: number;         // 0 for pending until disbursal
+  totalRepaid: number;
+  totalOutstanding: number;
+  percentRepaid: number;              // 0–100, derived server-side so the UI stays dumb
+  disbursedOn: string | null;
+  dueOn: string | null;
+  finalDueOn: string | null;
+  nextInstallmentAmount: number;
 }
 
 export async function listPending(enterpriseId: string): Promise<PendingLoanRow[]> {
@@ -211,6 +243,421 @@ export async function linkAndDisburse(
   }
 
   return { loanId, deviceId, externalId: externalId!, disbursedOn: today };
+}
+
+interface LoanLinkDeviceRow {
+  fineract_loan_id: string;
+  status: string;
+  client_name: string | null;
+  client_email: string | null;
+  external_id: string | null;
+  // Supabase renders a one-to-one FK join as an array (same pattern as
+  // listAvailableDevices below). Unwrap at the call site.
+  devices: Array<{
+    id: string;
+    device_name: string | null;
+    model: string | null;
+    imei: string | null;
+    serial_number: string | null;
+    platform: string | null;
+  }> | null;
+}
+
+/**
+ * Loan tracking list — union of (a) loans already disbursed and linked to devices
+ * (from loan_links, enriched live from Fineract) and (b) loans pending disbursal
+ * (from Fineract listPendingDisbursal, with the "no device yet" shape).
+ *
+ * Fineract reads are parallelized; errors on a single loan degrade to a row with
+ * the cached fields only so one 500 doesn't blank the whole page.
+ */
+export async function listAll(enterpriseId: string): Promise<LoanTrackingRow[]> {
+  const today = todayDarISO();
+
+  // (a) Disbursed loans (any status) — pulled from our side, enriched live.
+  const links = await run<LoanLinkDeviceRow[]>(
+    db().from("loan_links")
+      .select("fineract_loan_id, status, client_name, client_email, external_id, devices(id, device_name, model, imei, serial_number, platform)")
+      .eq("enterprise_id", enterpriseId),
+  );
+  const disbursedRows = await Promise.all(links.map(async (l): Promise<LoanTrackingRow> => {
+    const d = l.devices?.[0] ?? null;
+    const base: LoanTrackingRow = {
+      loanId: l.fineract_loan_id,
+      accountNo: null,
+      trackingStatus: "unknown",
+      dpd: 0,
+      clientName: l.client_name,
+      clientMobile: null,
+      clientEmail: l.client_email,
+      device: d ? {
+        id: d.id,
+        name: d.device_name,
+        model: d.model,
+        imei: d.imei,
+        serialNumber: d.serial_number,
+        platform: d.platform,
+      } : null,
+      productName: null,
+      principalDisbursed: 0,
+      totalRepaid: 0,
+      totalOutstanding: 0,
+      percentRepaid: 0,
+      disbursedOn: null,
+      dueOn: null,
+      finalDueOn: null,
+      nextInstallmentAmount: 0,
+    };
+    try {
+      const loan = await getLoan(l.fineract_loan_id, today);
+      return {
+        ...base,
+        accountNo: loan.accountNo || null,
+        trackingStatus: deriveTrackingStatus(loan.status, loan.dpd),
+        dpd: loan.dpd,
+        clientName: loan.clientName ?? base.clientName,
+        clientEmail: loan.clientEmail ?? base.clientEmail,
+        productName: loan.productName,
+        principalDisbursed: loan.principalDisbursed,
+        totalRepaid: loan.totalRepaid,
+        totalOutstanding: loan.totalOutstanding,
+        percentRepaid: computePercentRepaid(loan.totalRepaid, loan.principalDisbursed),
+        disbursedOn: loan.disbursedOn,
+        dueOn: loan.dueOn,
+        finalDueOn: loan.finalDueOn,
+        nextInstallmentAmount: loan.nextInstallmentAmount,
+      };
+    } catch (e) {
+      log("warn", "loans.list_all.fineract_fetch_failed", { loan_id: l.fineract_loan_id, error: String(e) });
+      // Fall back to the link's cached fields; status best-effort from the link row.
+      return {
+        ...base,
+        trackingStatus: l.status === "closed" ? "closed" : l.status === "written_off" ? "written_off" : "unknown",
+      };
+    }
+  }));
+
+  // (b) Pending disbursal — direct from Fineract. These don't have a device yet.
+  let pending: FineractPendingLoan[] = [];
+  try {
+    pending = await listPendingDisbursal();
+  } catch (e) {
+    log("warn", "loans.list_all.pending_fetch_failed", { error: String(e) });
+  }
+  const linkedLoanIds = new Set(links.map((l) => l.fineract_loan_id));
+  const pendingRows: LoanTrackingRow[] = pending
+    .filter((p) => !linkedLoanIds.has(p.loanId))
+    .map((p) => ({
+      loanId: p.loanId,
+      accountNo: p.accountNo ?? null,
+      trackingStatus: "pending",
+      dpd: 0,
+      clientName: p.clientName ?? null,
+      clientMobile: null,
+      clientEmail: null,
+      device: null,
+      productName: p.productName ?? null,
+      principalDisbursed: Number(p.principal ?? 0),
+      totalRepaid: 0,
+      totalOutstanding: Number(p.principal ?? 0),
+      percentRepaid: 0,
+      disbursedOn: null,
+      dueOn: null,
+      finalDueOn: null,
+      nextInstallmentAmount: 0,
+    }));
+
+  return [...pendingRows, ...disbursedRows];
+}
+
+function deriveTrackingStatus(status: string, dpd: number): LoanTrackingRow["trackingStatus"] {
+  if (status === "closed") return "closed";
+  if (status === "written_off") return "written_off";
+  if (status === "overpaid") return "overpaid";
+  if (status === "approved" || status === "pending") return "pending";
+  if (status === "active") return dpd > 0 ? "overdue" : "active";
+  return "unknown";
+}
+
+function computePercentRepaid(totalRepaid: number, principal: number): number {
+  if (!(principal > 0)) return 0;
+  const pct = (totalRepaid / principal) * 100;
+  if (pct < 0) return 0;
+  if (pct > 100) return 100;
+  return Math.round(pct * 10) / 10;   // one decimal is enough for a progress bar label
+}
+
+/** One loan's full tracking detail — expanded view for the row-click modal. */
+export interface LoanTrackingDetail extends LoanTrackingRow {
+  schedule: Array<{
+    period: number;
+    dueDate: string | null;
+    principalDue: number;
+    interestDue: number;
+    feesDue: number;
+    totalDue: number;
+    totalPaid: number;
+    outstanding: number;
+    complete: boolean;
+    daysOverdue: number;
+  }>;
+  lockEvents: Array<{
+    id: string;
+    action: string;
+    state: string;
+    actionTime: string | null;
+    completedAt: string | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+  }>;
+  tierState: {
+    desiredTier: string | null;
+    appliedTier: string | null;
+    observedState: string | null;
+    observedAt: string | null;
+    lastLoanDpd: number | null;
+    lastError: string | null;
+  } | null;
+  // Derived checks reconciling Mapene loan state ↔ device tier/lock state ↔ MalipoPay.
+  // Computed cheaply on read so the detail view is always current; a daily worker
+  // (reconciliation_findings table, task #16) will persist these for alerting.
+  reconciliation: Array<{
+    check: string;
+    state: "ok" | "warn" | "mismatch" | "pending";
+    detail: string;
+  }>;
+}
+
+export async function getTrackingDetail(enterpriseId: string, loanId: string): Promise<LoanTrackingDetail> {
+  const today = todayDarISO();
+
+  // Live Fineract read first — authoritative on all monetary fields.
+  const loan = await getLoan(loanId, today);
+
+  // Pull the loan_links row (and its device) for the enterprise-scoped device identity.
+  // Keep the query tolerant: a still-pending loan has no loan_links row yet.
+  const [linkRow] = await run<LoanLinkDeviceRow[]>(
+    db().from("loan_links")
+      .select("fineract_loan_id, status, client_name, client_email, external_id, devices(id, device_name, model, imei, serial_number, platform)")
+      .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
+  );
+  const d = linkRow?.devices?.[0] ?? null;
+
+  // Client mobile from Fineract live — not cached on loan_links today.
+  let clientMobile: string | null = null;
+  if (loan.clientId) {
+    try {
+      const c = await getClient(loan.clientId);
+      if (c) clientMobile = c.mobileNo ?? null;
+    } catch (e) {
+      log("warn", "loans.detail.client_fetch_failed", { loan_id: loanId, error: String(e) });
+    }
+  }
+
+  const schedule = await fetchLoanSchedule(loanId, today);
+
+  // Device tier state (desired → applied → observed) for reconciliation.
+  let tierState: LoanTrackingDetail["tierState"] = null;
+  if (d?.id) {
+    const [tsRow] = await run<Array<{ desired_tier: string | null; applied_tier: string | null; observed_state: string | null; observed_at: string | null; last_loan_dpd: number | null; last_error: string | null }>>(
+      db().from("device_tier_state")
+        .select("desired_tier, applied_tier, observed_state, observed_at, last_loan_dpd, last_error")
+        .eq("enterprise_id", enterpriseId).eq("device_id", d.id).limit(1),
+    );
+    if (tsRow) {
+      tierState = {
+        desiredTier: tsRow.desired_tier,
+        appliedTier: tsRow.applied_tier,
+        observedState: tsRow.observed_state,
+        observedAt: tsRow.observed_at,
+        lastLoanDpd: tsRow.last_loan_dpd,
+        lastError: tsRow.last_error,
+      };
+    }
+  }
+
+  // Lock/unlock events scoped to this loan's device, newest first.
+  let lockEvents: LoanTrackingDetail["lockEvents"] = [];
+  if (d?.id) {
+    const rows = await run<Array<{ id: string; action: string; state: string; action_time: string | null; completed_at: string | null; error_code: string | null; error_message: string | null }>>(
+      db().from("events")
+        .select("id, action, state, action_time, completed_at, error_code, error_message")
+        .eq("enterprise_id", enterpriseId)
+        .eq("device_id", d.id)
+        .in("action", ["device.lock", "device.unlock", "device.lost_mode_enable", "device.lost_mode_disable"])
+        .order("action_time", { ascending: false })
+        .limit(50),
+    );
+    lockEvents = rows.map((r) => ({
+      id: r.id,
+      action: r.action,
+      state: r.state,
+      actionTime: r.action_time,
+      completedAt: r.completed_at,
+      errorCode: r.error_code,
+      errorMessage: r.error_message,
+    }));
+  }
+
+  const reconciliation = buildReconciliation(loan, tierState, lockEvents);
+
+  return {
+    loanId: loan.loanId,
+    accountNo: loan.accountNo || null,
+    trackingStatus: deriveTrackingStatus(loan.status, loan.dpd),
+    dpd: loan.dpd,
+    clientName: loan.clientName ?? linkRow?.client_name ?? null,
+    clientMobile,
+    clientEmail: loan.clientEmail ?? linkRow?.client_email ?? null,
+    device: d ? {
+      id: d.id,
+      name: d.device_name,
+      model: d.model,
+      imei: d.imei,
+      serialNumber: d.serial_number,
+      platform: d.platform,
+    } : null,
+    productName: loan.productName,
+    principalDisbursed: loan.principalDisbursed,
+    totalRepaid: loan.totalRepaid,
+    totalOutstanding: loan.totalOutstanding,
+    percentRepaid: computePercentRepaid(loan.totalRepaid, loan.principalDisbursed),
+    disbursedOn: loan.disbursedOn,
+    dueOn: loan.dueOn,
+    finalDueOn: loan.finalDueOn,
+    nextInstallmentAmount: loan.nextInstallmentAmount,
+    schedule,
+    lockEvents,
+    tierState,
+    reconciliation,
+  };
+}
+
+/**
+ * Reconciliation derivation. Compares Mapene loan state against the device's
+ * tier state and recent lock events. Each check returns ok (fully consistent),
+ * warn (soft drift — in-flight or recoverable), mismatch (loud inconsistency
+ * ops should act on), or pending (dependency not yet integrated — MalipoPay).
+ *
+ * The daily worker (task #16) will run this same shape across all loans and
+ * persist findings; the detail view calls it inline so the UI is always live.
+ */
+function buildReconciliation(
+  loan: FineractLoanSummary,
+  tierState: LoanTrackingDetail["tierState"],
+  lockEvents: LoanTrackingDetail["lockEvents"],
+): LoanTrackingDetail["reconciliation"] {
+  const out: LoanTrackingDetail["reconciliation"] = [];
+
+  // (1) Mapene loan status vs device tier intent.
+  // Active + overdue → the device should be moving toward or already at 'locked';
+  // closed → device should be 'released'; approved/pending → undisbursed is fine.
+  if (!tierState) {
+    out.push({
+      check: "Loan vs device tier",
+      state: loan.status === "approved" || loan.status === "pending" ? "ok" : "warn",
+      detail: tierState
+        ? "No tier state recorded for this device yet."
+        : "No tier state recorded — automation hasn't acted on this device yet.",
+    });
+  } else {
+    const desired = tierState.desiredTier;
+    if (loan.status === "closed" && desired && desired !== "released" && desired !== "closed") {
+      out.push({ check: "Loan vs device tier", state: "mismatch", detail: `Loan closed but desired tier is "${desired}" (expected "released").` });
+    } else if (loan.status === "active" && loan.dpd >= 3 && desired !== "locked") {
+      out.push({ check: "Loan vs device tier", state: "mismatch", detail: `Loan is ${loan.dpd} days past due but desired tier is "${desired ?? "unset"}" (expected "locked").` });
+    } else if (loan.status === "written_off" && desired !== "locked") {
+      out.push({ check: "Loan vs device tier", state: "mismatch", detail: `Loan written off but desired tier is "${desired ?? "unset"}".` });
+    } else {
+      out.push({ check: "Loan vs device tier", state: "ok", detail: `Desired tier: ${desired ?? "unset"}.` });
+    }
+
+    // (2) Desired vs applied vs observed drift. "In flight" is a warn, divergence is a mismatch.
+    const desiredT = tierState.desiredTier;
+    const appliedT = tierState.appliedTier;
+    const observedT = tierState.observedState;
+    if (!appliedT && desiredT) {
+      out.push({ check: "Tier apply state", state: "warn", detail: `Desired "${desiredT}" not yet applied.` });
+    } else if (desiredT && appliedT && desiredT !== appliedT) {
+      out.push({ check: "Tier apply state", state: "mismatch", detail: `Desired "${desiredT}" but applied "${appliedT}"${tierState.lastError ? ` (${tierState.lastError})` : ""}.` });
+    } else if (appliedT && observedT && observedT !== "unknown" && appliedT !== observedT) {
+      out.push({ check: "Tier apply state", state: "mismatch", detail: `We think tier is "${appliedT}" but Zoho reports "${observedT}".` });
+    } else if (appliedT) {
+      out.push({ check: "Tier apply state", state: "ok", detail: `Applied "${appliedT}"${observedT && observedT !== "unknown" ? `, Zoho confirms "${observedT}"` : ""}.` });
+    }
+  }
+
+  // (3) Most recent lock event vs the current loan state.
+  const lastLock = lockEvents.find((e) => e.action === "device.lock");
+  const lastUnlock = lockEvents.find((e) => e.action === "device.unlock");
+  const latest = [lastLock, lastUnlock]
+    .filter(Boolean)
+    .sort((a, b) => (b!.actionTime ?? "").localeCompare(a!.actionTime ?? ""))[0];
+  if (latest) {
+    const wasLock = latest.action === "device.lock";
+    const expectsLocked = loan.status === "active" ? loan.dpd >= 3 : loan.status === "written_off";
+    if (wasLock && !expectsLocked && latest.state === "succeeded") {
+      out.push({ check: "Lock action vs loan state", state: "warn", detail: `Device locked at ${latest.actionTime ?? "—"} but loan is now ${loan.status}${loan.dpd ? ` (${loan.dpd}d dpd)` : ""}.` });
+    } else if (!wasLock && expectsLocked && latest.state === "succeeded") {
+      out.push({ check: "Lock action vs loan state", state: "warn", detail: `Device unlocked at ${latest.actionTime ?? "—"} but loan is overdue (${loan.dpd}d).` });
+    } else if (latest.state === "failed" || latest.state === "dead") {
+      out.push({ check: "Lock action vs loan state", state: "mismatch", detail: `Latest ${latest.action.replace(/^device\./, "")} failed: ${latest.errorMessage ?? latest.errorCode ?? "no reason"}.` });
+    } else {
+      out.push({ check: "Lock action vs loan state", state: "ok", detail: `Most recent action: ${latest.action.replace(/^device\./, "")} · ${latest.state}.` });
+    }
+  }
+
+  // (4) MalipoPay reconciliation — stubbed until the integration ships.
+  // Task #17 fills this in by looking up last payment ref + amount for the loan.
+  out.push({
+    check: "MalipoPay payments",
+    state: "pending",
+    detail: "MalipoPay integration not wired yet. Will compare last payment vs Mapene totalRepaid once live.",
+  });
+
+  return out;
+}
+
+/** Flatten Fineract's repaymentSchedule.periods into a UI-friendly shape. */
+async function fetchLoanSchedule(loanId: string, todayISO: string): Promise<LoanTrackingDetail["schedule"]> {
+  try {
+    const raw = await fetchRawLoan(loanId);
+    const periods = ((raw?.repaymentSchedule as { periods?: Array<Record<string, unknown>> } | undefined)?.periods ?? []) as Array<Record<string, unknown>>;
+    return periods
+      .filter((p) => p.period !== undefined && p.dueDate !== undefined)
+      .map((p) => {
+        const due = coerceDateArray(p.dueDate);
+        const complete = Boolean(p.complete) || Boolean(p.obligationsMetOnDate);
+        return {
+          period: Number(p.period ?? 0),
+          dueDate: due,
+          principalDue: Number(p.principalDue ?? p.principalOriginalDue ?? 0),
+          interestDue: Number(p.interestDue ?? p.interestOriginalDue ?? 0),
+          feesDue: Number(p.feeChargesDue ?? 0) + Number(p.penaltyChargesDue ?? 0),
+          totalDue: Number(p.totalDueForPeriod ?? 0),
+          totalPaid: Number(p.totalPaidForPeriod ?? 0),
+          outstanding: Number(p.totalOutstandingForPeriod ?? 0),
+          complete,
+          daysOverdue: complete || !due ? 0 : Math.max(0, daysBetweenISO(todayISO, due)),
+        };
+      });
+  } catch (e) {
+    log("warn", "loans.detail.schedule_fetch_failed", { loan_id: loanId, error: String(e) });
+    return [];
+  }
+}
+
+function coerceDateArray(v: unknown): string | null {
+  if (!Array.isArray(v) || v.length < 3) return null;
+  const [y, m, d] = v as number[];
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null;
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function daysBetweenISO(fromISO: string, toISO: string): number {
+  const [fy, fm, fd] = fromISO.split("-").map(Number);
+  const [ty, tm, td] = toISO.split("-").map(Number);
+  return Math.round((Date.UTC(fy, fm - 1, fd) - Date.UTC(ty, tm - 1, td)) / 86_400_000);
 }
 
 /** Fineract renders dates as `dd MMMM yyyy`. Match the configured locale. */

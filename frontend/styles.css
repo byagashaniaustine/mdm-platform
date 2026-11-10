@@ -229,6 +229,17 @@ input:disabled, select:disabled { background: var(--neutral-bg); color: var(--mu
 .progress { height: 4px; background: var(--neutral-bg); border-radius: 4px; overflow: hidden; margin-top: 6px; }
 .progress span { display: block; height: 100%; background: var(--copper); }
 
+/* Loan tracking: rows are clickable, detail modal uses labeled key/value panels. */
+tr.clickable { cursor: pointer; }
+tr.clickable:focus-visible { outline: 2px solid var(--copper); outline-offset: -2px; }
+.panel { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 14px; background: var(--ivory); }
+.panel-head { margin: 0 0 10px; font-size: 0.85rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+.kv { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; padding: 4px 0; }
+.kv > :first-child { flex: 0 0 auto; }
+.kv > :last-child { text-align: right; font-weight: 500; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+
 /* tables (stack into cards on mobile) */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
 .toolbar input[type="search"] { max-width: 280px; }

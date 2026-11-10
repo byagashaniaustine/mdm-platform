@@ -22,8 +22,12 @@ export interface FineractLoanSummary {
   externalId: string | null;        // our device-link key (serial/IMEI, see §12.1)
   disbursedOn: string | null;       // YYYY-MM-DD
   dueOn: string | null;             // YYYY-MM-DD; next unpaid due date (single-balloon → the balloon date)
+  finalDueOn: string | null;        // YYYY-MM-DD; last period's dueDate (the loan's hard end)
   dpd: number;                      // days past due; 0 if not overdue
   totalOutstanding: number;         // whatever currency the product uses
+  principalDisbursed: number;       // amount financed (what the customer owes before interest)
+  totalRepaid: number;              // principal+interest+fees paid to date; drives the % progress bar
+  nextInstallmentAmount: number;    // what's due on dueOn (0 if nothing unpaid)
 }
 
 interface FineractAuth {
@@ -136,6 +140,29 @@ function nextDueFromSchedule(schedule: unknown): string | null {
   return null;
 }
 
+/** Last period's dueDate — the loan's hard end regardless of paid state. */
+function finalDueFromSchedule(schedule: unknown): string | null {
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown }> } | undefined)?.periods ?? [];
+  for (let i = periods.length - 1; i >= 0; i--) {
+    const due = arrToDate(periods[i].dueDate);
+    if (due) return due;
+  }
+  return null;
+}
+
+/** Next unpaid period's totalDueForPeriod (installment amount). 0 if all paid. */
+function nextInstallmentFromSchedule(schedule: unknown): number {
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: number; totalOutstandingForPeriod?: number }> } | undefined)?.periods ?? [];
+  for (const p of periods) {
+    const due = arrToDate(p.dueDate);
+    if (!due) continue;
+    if (p.complete || p.obligationsMetOnDate) continue;
+    // Prefer outstanding (handles partial-payment state), fall back to totalDue.
+    return Number(p.totalOutstandingForPeriod ?? p.totalDueForPeriod ?? 0);
+  }
+  return 0;
+}
+
 function daysBetween(fromISO: string, toISO: string): number {
   const [fy, fm, fd] = fromISO.split("-").map(Number);
   const [ty, tm, td] = toISO.split("-").map(Number);
@@ -151,11 +178,21 @@ function isNetworkFailure(e: unknown): boolean {
   return toAppError(e).code !== "FINERACT_UNCONFIGURED";
 }
 
+/**
+ * Raw Fineract loan payload — kept for callers that need the full repayment
+ * schedule beyond what getLoan summarizes (e.g. the Loan Tracking detail view).
+ */
+export async function fetchRawLoan(loanId: string): Promise<Record<string, unknown>> {
+  return await withBreaker(BREAKER, async () => {
+    return await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?associations=repaymentSchedule,summary`);
+  }, { countFailure: isNetworkFailure });
+}
+
 /** Full loan detail — status, repayment schedule, DPD, outstanding, externalId. */
 export async function getLoan(loanId: string, todayISO: string): Promise<FineractLoanSummary> {
   return await withBreaker(BREAKER, async () => {
     const raw = await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?associations=repaymentSchedule,summary`);
-    const summary = (raw.summary ?? {}) as { totalOutstanding?: number };
+    const summary = (raw.summary ?? {}) as { totalOutstanding?: number; principalDisbursed?: number; totalRepayment?: number };
     const timeline = (raw.timeline ?? {}) as { actualDisbursementDate?: unknown };
     return {
       loanId: String(raw.id ?? loanId),
@@ -169,8 +206,12 @@ export async function getLoan(loanId: string, todayISO: string): Promise<Finerac
       externalId: (raw.externalId as string | null) || null,
       disbursedOn: arrToDate(timeline.actualDisbursementDate),
       dueOn: nextDueFromSchedule(raw.repaymentSchedule),
+      finalDueOn: finalDueFromSchedule(raw.repaymentSchedule),
       dpd: dpdFromSchedule(raw.repaymentSchedule, todayISO),
       totalOutstanding: Number(summary.totalOutstanding ?? 0),
+      principalDisbursed: Number(summary.principalDisbursed ?? 0),
+      totalRepaid: Number(summary.totalRepayment ?? 0),
+      nextInstallmentAmount: nextInstallmentFromSchedule(raw.repaymentSchedule),
     };
   }, { countFailure: isNetworkFailure });
 }

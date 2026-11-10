@@ -4,7 +4,7 @@
 import { Hono } from "hono";
 import { readJson, str } from "../lib/validate.ts";
 import { type AppEnv, requireRole, requireSession } from "../middleware/auth.ts";
-import { linkAndDisburse, listAvailableDevices, listPending } from "../services/loans.ts";
+import { getTrackingDetail, linkAndDisburse, listAll, listAvailableDevices, listPending } from "../services/loans.ts";
 
 export function loanRoutes() {
   const r = new Hono<AppEnv>();
@@ -15,6 +15,17 @@ export function loanRoutes() {
 
   r.get("/available-devices", async (c) =>
     c.json({ data: await listAvailableDevices(c.get("session").enterpriseId) }));
+
+  // Loan tracking table: every loan in any state (pending, active, overdue,
+  // closed, written-off), shaped for the colored-tag table in the Console.
+  r.get("/all", async (c) =>
+    c.json({ data: await listAll(c.get("session").enterpriseId) }));
+
+  // Row-click detail: full schedule + lock event history.
+  r.get("/:loanId/detail", async (c) => {
+    const loanId = str({ loanId: c.req.param("loanId") }, "loanId", { max: 64 });
+    return c.json({ data: await getTrackingDetail(c.get("session").enterpriseId, loanId) });
+  });
 
   r.post("/:loanId/link-and-disburse", requireRole("admin"), async (c) => {
     const loanId = str({ loanId: c.req.param("loanId") }, "loanId", { max: 64 });
