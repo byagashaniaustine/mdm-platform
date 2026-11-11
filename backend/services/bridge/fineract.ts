@@ -169,13 +169,24 @@ function daysBetween(fromISO: string, toISO: string): number {
   return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000);
 }
 
-// All Fineract reads share one circuit breaker. UNCONFIGURED is a dev-time
-// state (no base URL set) and must NOT count against the trip threshold.
-// Everything else — unreachable host, 401, 404, 5xx — is a real signal that
-// Fineract is unhealthy right now.
+// All Fineract reads share one circuit breaker. Only genuine upstream-health
+// signals count against the trip threshold: network errors, 5xx, and 401 (every
+// call will fail the same way until creds are fixed, so failing fast is right).
+// Per-loan outcomes do NOT count:
+//   - FINERACT_NOT_FOUND: the loan doesn't exist on this Fineract. Reconcile
+//     closes the orphaned loan_link on 404 (reconcile.ts); if the breaker trips
+//     first, subsequent orphans throw UNAVAILABLE instead and never get closed.
+//   - FINERACT_BAD_REQUEST: typically a validation/state error for ONE loan
+//     (e.g., "cannot modify in current state"). Other loans are unaffected.
+//   - FINERACT_UNCONFIGURED: dev-time state (no base URL); never a signal.
 const BREAKER = "fineract";
+const NON_UPSTREAM_FAILURES: ReadonlySet<string> = new Set([
+  "FINERACT_UNCONFIGURED",
+  "FINERACT_NOT_FOUND",
+  "FINERACT_BAD_REQUEST",
+]);
 function isNetworkFailure(e: unknown): boolean {
-  return toAppError(e).code !== "FINERACT_UNCONFIGURED";
+  return !NON_UPSTREAM_FAILURES.has(toAppError(e).code);
 }
 
 /**

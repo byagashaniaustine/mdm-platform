@@ -567,6 +567,24 @@ Deno.test("circuit breaker: trips open after N consecutive failures and fails fa
   assert.equal(calls, 3, "fn should NOT have been called while breaker is open");
 });
 
+Deno.test("circuit breaker: countFailure=false errors don't count toward trip", async () => {
+  _resetBreakers();
+  const name = "test-filter";
+  let calls = 0;
+  // Three per-item failures (e.g. NOT_FOUND) that the filter says shouldn't
+  // count. Breaker stays closed, fn keeps being called — the regression is a
+  // run of orphaned-loan 404s tripping the breaker and blocking the batch.
+  const ignored = () => { calls++; return Promise.reject(new Error("NOT_FOUND")); };
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(() => withBreaker(name, ignored, {
+      trip: 3, openMs: 10_000,
+      countFailure: (e) => !(e instanceof Error && e.message === "NOT_FOUND"),
+    }));
+  }
+  assert.equal(calls, 5, "fn should keep being called — 404-like errors don't trip");
+  assert.equal(breakerState(name).state, "closed");
+});
+
 Deno.test("circuit breaker: half-open probe closes on success", async () => {
   _resetBreakers();
   const name = "test-halfopen";
