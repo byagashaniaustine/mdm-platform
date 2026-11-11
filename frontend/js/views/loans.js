@@ -23,14 +23,22 @@ export async function loansView(el, ctx) {
   );
 
   try {
-    const rows = await get("/api/loans/all");
+    const payload = await get("/api/loans/all");
     if (el.__viewToken !== mountToken) return;
+    const rows = payload?.rows ?? [];
+    const warnings = payload?.warnings ?? {};
+    const banner = warnings.pendingUnavailable ? pendingUnavailableBanner(warnings.pendingError) : null;
     if (!rows.length) {
-      clear(contentBox, emptyState(
-        "No loans yet",
-        "When Mapene approves a loan it will appear here. Once disbursed, repayment progress shows live.",
-        refreshBtn,
-      ));
+      clear(contentBox,
+        banner,
+        emptyState(
+          "No loans yet",
+          warnings.pendingUnavailable
+            ? "Linked loans load from our database, but pending loans need Mapene — and Mapene isn't answering right now. Retry once the banner above clears."
+            : "When Mapene approves a loan it will appear here. Once disbursed, repayment progress shows live.",
+          refreshBtn,
+        ),
+      );
       return;
     }
     rows.sort(sortForDisplay);
@@ -91,7 +99,7 @@ export async function loansView(el, ctx) {
         }),
       },
     );
-    clear(contentBox, tbl);
+    clear(contentBox, banner, tbl);
   } catch (err) {
     toastError(err);
     clear(contentBox, emptyState("Could not load loans", String(err?.message ?? err), refreshBtn));
@@ -116,6 +124,23 @@ const STATUS_LABEL = {
   overpaid: "Overpaid",
   unknown: "—",
 };
+
+function pendingUnavailableBanner(code) {
+  // Shown when listAll succeeds but listPendingDisbursal didn't. Admins were
+  // seeing "no pending loans" and assuming the link flow was broken; this
+  // tells them the real cause (Fineract unreachable / breaker open / auth).
+  const detail = code === "FINERACT_UNAVAILABLE"
+    ? "Mapene (istore.lms.bsa.ai) isn't responding — pending loans can't be listed. Linked loans below still load from our database. Retry in a minute; if it persists, check Mapene / the fineract circuit breaker."
+    : code === "FINERACT_UNAUTHORIZED"
+    ? "Mapene rejected our credentials — pending loans can't be listed. Linked loans below still load from our database. Check FINERACT_USERNAME / FINERACT_PASSWORD."
+    : `Mapene couldn't be reached for pending loans (${code ?? "unknown"}). Linked loans below still load from our database.`;
+  return h("div", { class: "banner banner-warn" },
+    h("div", { class: "stack" },
+      h("strong", {}, "Pending loans unavailable"),
+      h("span", { class: "small" }, detail),
+    ),
+  );
+}
 
 function statusTag(loan) {
   const tone = STATUS_TONE[loan.trackingStatus] ?? "muted";

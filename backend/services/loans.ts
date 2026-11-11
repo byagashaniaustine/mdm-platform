@@ -263,15 +263,30 @@ interface LoanLinkDeviceRow {
   }> | null;
 }
 
+/** Soft-failure flags surfaced to the Loans page so a silent zero-row result
+ *  (Fineract unreachable, breaker open, auth misconfigured) is distinguishable
+ *  from a genuine empty state. */
+export interface LoanTrackingWarnings {
+  pendingUnavailable: boolean;    // listPendingDisbursal threw — pending rows missing
+  pendingError?: string;          // short code for the UI, e.g. FINERACT_UNAVAILABLE
+}
+
+export interface LoanTrackingResult {
+  rows: LoanTrackingRow[];
+  warnings: LoanTrackingWarnings;
+}
+
 /**
  * Loan tracking list — union of (a) loans already disbursed and linked to devices
  * (from loan_links, enriched live from Fineract) and (b) loans pending disbursal
  * (from Fineract listPendingDisbursal, with the "no device yet" shape).
  *
  * Fineract reads are parallelized; errors on a single loan degrade to a row with
- * the cached fields only so one 500 doesn't blank the whole page.
+ * the cached fields only so one 500 doesn't blank the whole page. A failure of
+ * the pending-fetch is surfaced via `warnings.pendingUnavailable` so the UI can
+ * banner it instead of looking empty.
  */
-export async function listAll(enterpriseId: string): Promise<LoanTrackingRow[]> {
+export async function listAll(enterpriseId: string): Promise<LoanTrackingResult> {
   const today = todayDarISO();
 
   // (a) Disbursed loans (any status) — pulled from our side, enriched live.
@@ -338,11 +353,19 @@ export async function listAll(enterpriseId: string): Promise<LoanTrackingRow[]> 
   }));
 
   // (b) Pending disbursal — direct from Fineract. These don't have a device yet.
+  // If this fails (open breaker, Fineract down, 401) we still render the
+  // already-linked loans but tell the UI so it can banner the state — a silent
+  // zero-pending list was indistinguishable from a healthy "no pending loans"
+  // and had admins thinking the link flow was broken (2026-11-11).
   let pending: FineractPendingLoan[] = [];
+  const warnings: LoanTrackingWarnings = { pendingUnavailable: false };
   try {
     pending = await listPendingDisbursal();
   } catch (e) {
-    log("warn", "loans.list_all.pending_fetch_failed", { error: String(e) });
+    const err = toAppError(e);
+    warnings.pendingUnavailable = true;
+    warnings.pendingError = err.code;
+    log("warn", "loans.list_all.pending_fetch_failed", { error: String(e), code: err.code });
   }
   const linkedLoanIds = new Set(links.map((l) => l.fineract_loan_id));
   const pendingRows: LoanTrackingRow[] = pending
@@ -367,7 +390,7 @@ export async function listAll(enterpriseId: string): Promise<LoanTrackingRow[]> 
       nextInstallmentAmount: 0,
     }));
 
-  return [...pendingRows, ...disbursedRows];
+  return { rows: [...pendingRows, ...disbursedRows], warnings };
 }
 
 function deriveTrackingStatus(status: string, dpd: number): LoanTrackingRow["trackingStatus"] {

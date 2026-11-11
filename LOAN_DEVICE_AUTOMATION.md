@@ -19,7 +19,7 @@ The phone is the collateral. A customer buys a handset on credit; while they are
 
 | System | Source of truth for | Role in this flow |
 |---|---|---|
-| **Fineract** (`api.fineract.bsa.ai`) | the **loan** — product, due date, days-past-due (DPD), paid/closed | emits events + answers reads; never talks to a phone |
+| **Fineract** (`istore.lms.bsa.ai`) | the **loan** — product, due date, days-past-due (DPD), paid/closed | emits events + answers reads; never talks to a phone |
 | **MDM Console** (`mdm-platform`) | **policy** — loan-state→tier rule, command queue, confirmations, audit | the brain; decides and orchestrates. The **Bridge** lives here |
 | **Zoho MDM** | the **device** — enrollment, group, command delivery, online/offline | applies profiles/commands; the Console reads it back to confirm |
 
@@ -345,8 +345,8 @@ No new Zoho integration — the Bridge calls existing group-move and command/pro
 ## 14. Configuration (follow `config.ts` `env()`/`num()` pattern)
 
 ```
-FINERACT_BASE_URL          # https://api.fineract.bsa.ai/fineract-provider/api/v1
-FINERACT_TENANT_ID         # default
+FINERACT_BASE_URL          # https://istore.lms.bsa.ai/fineract-provider/api/v1
+FINERACT_TENANT_ID         # istore
 FINERACT_USERNAME          # svc-mdm-bridge   (NOT mifos)
 FINERACT_PASSWORD_ENC      # or OAuth2 client creds; never commit plaintext
 FINERACT_WEBHOOK_SECRET    # HMAC shared secret for /api/fineract/hooks
@@ -403,7 +403,7 @@ Acceptance for each phase requires type-check clean + all of the above green.
 **Do not start the locking tiers until these hold.** Ownership in brackets.
 
 ### 18.1 Fineract side (Derick)
-- [ ] `api.fineract.bsa.ai` **allowlisted** on the Black Swan egress policy (currently 403 — hard blocker).
+- [x] `istore.lms.bsa.ai` reachable from this deployment (webhook end-to-end verified 2026-11-05; see [[fineract-integration-state]]).
 - [ ] Dedicated **service user** with least-privilege role; default `mifos`/`password` rotated.
 - [ ] Every loan carries **`externalId` = device serial/IMEI** at origination (null today).
 - [ ] **Hooks** configured for DISBURSE / REPAYMENT / CLOSE → `/api/fineract/hooks` with secret.

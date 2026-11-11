@@ -1,9 +1,9 @@
-# Fineract — `api.fineract.bsa.ai`
+# Fineract — `istore.lms.bsa.ai`
 
-Snapshot of the Fineract core-banking instance for the Black Swan Analytics (`bsa.ai`) organisation, taken 2026-10-28.
+Snapshot of the Fineract core-banking instance for the Black Swan Analytics (`bsa.ai`) organisation. Original snapshot 2026-10-28 against `api.fineract.bsa.ai` (defunct); host moved to `istore.lms.bsa.ai` (Fineract CE 1.15 "istore" build) and tenant renamed to `istore` — reflected below.
 
-- **Base URL:** `https://api.fineract.bsa.ai/fineract-provider/api/v1`
-- **Tenant:** `default` (header `Fineract-Platform-TenantId: default`)
+- **Base URL:** `https://istore.lms.bsa.ai/fineract-provider/api/v1`
+- **Tenant:** `istore` (header `Fineract-Platform-TenantId: istore`)
 - **Auth:** HTTP Basic (service account `mifos`)
 - **Operational currency:** TZS (Tanzanian Shilling). USD is also enabled at the platform level but no product uses it yet.
 
