@@ -129,7 +129,10 @@ export function modal(title, body, actions = []) {
         if (!a.onClick) return close();
         btn.disabled = true;
         try {
-          const keep = await a.onClick();
+          // Pass close so handlers can swap this modal for another mid-click
+          // (Loans → "Link & disburse" opens the device picker). Other handlers
+          // use async () => ... and ignore the extra arg harmlessly.
+          const keep = await a.onClick(close);
           if (keep !== true) close();
         } catch (err) {
           toastError(err);
