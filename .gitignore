@@ -11,3 +11,6 @@ backend/self_client*.json
 
 # local scratch db from one-off probes
 db.sqlite
+
+# one-off cleanup / repro scripts (create, run once, delete — keep out of git)
+scripts/cleanup_*.ts
