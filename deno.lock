@@ -1,8 +1,18 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@std/cli@*": "1.0.32",
+    "jsr:@std/dotenv@*": "0.225.8",
     "npm:@supabase/supabase-js@^2.45.0": "2.117.2",
     "npm:hono@^4.6.0": "4.13.11"
+  },
+  "jsr": {
+    "@std/cli@1.0.32": {
+      "integrity": "188b3a100d6202d64e3f5bd3d799c7fa4f6d77f92cc65eb7f641c1fa0aa92a66"
+    },
+    "@std/dotenv@0.225.8": {
+      "integrity": "27b8c1a9d00cbf938345a5924487c04d9b27bdd7e7bd1983f54bcf76d0a0174a"
+    }
   },
   "npm": {
     "@supabase/auth-js@2.117.2": {

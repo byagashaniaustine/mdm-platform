@@ -245,22 +245,27 @@ export async function linkAndDisburse(
   return { loanId, deviceId, externalId: externalId!, disbursedOn: today };
 }
 
+interface EmbeddedDevice {
+  id: string;
+  device_name: string | null;
+  model: string | null;
+  imei: string | null;
+  serial_number: string | null;
+  platform: string | null;
+}
 interface LoanLinkDeviceRow {
   fineract_loan_id: string;
   status: string;
   client_name: string | null;
   client_email: string | null;
   external_id: string | null;
-  // Supabase renders a one-to-one FK join as an array (same pattern as
-  // listAvailableDevices below). Unwrap at the call site.
-  devices: Array<{
-    id: string;
-    device_name: string | null;
-    model: string | null;
-    imei: string | null;
-    serial_number: string | null;
-    platform: string | null;
-  }> | null;
+  // PostgREST may render this to-one FK as a single object OR an array
+  // depending on client / schema cache state; `unwrapDevice` handles both.
+  devices: EmbeddedDevice | EmbeddedDevice[] | null;
+}
+function unwrapDevice(v: EmbeddedDevice | EmbeddedDevice[] | null | undefined): EmbeddedDevice | null {
+  if (!v) return null;
+  return Array.isArray(v) ? v[0] ?? null : v;
 }
 
 /** Soft-failure flags surfaced to the Loans page so a silent zero-row result
@@ -296,7 +301,7 @@ export async function listAll(enterpriseId: string): Promise<LoanTrackingResult>
       .eq("enterprise_id", enterpriseId),
   );
   const disbursedRows = await Promise.all(links.map(async (l): Promise<LoanTrackingRow> => {
-    const d = l.devices?.[0] ?? null;
+    const d = unwrapDevice(l.devices);
     const base: LoanTrackingRow = {
       loanId: l.fineract_loan_id,
       accountNo: null,
@@ -464,7 +469,7 @@ export async function getTrackingDetail(enterpriseId: string, loanId: string): P
       .select("fineract_loan_id, status, client_name, client_email, external_id, devices(id, device_name, model, imei, serial_number, platform)")
       .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
   );
-  const d = linkRow?.devices?.[0] ?? null;
+  const d = unwrapDevice(linkRow?.devices);
 
   // Client mobile from Fineract live — not cached on loan_links today.
   let clientMobile: string | null = null;
