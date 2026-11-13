@@ -10,9 +10,10 @@ const STALE_MS = 6 * 3600_000;
 
 let protomapsPromise = null;
 function loadProtomaps() {
-  // protomaps-leaflet@4 ships ESM only — no UMD bundle. esm.sh resolves peer
-  // deps (pbf, vector-tile, point-geometry, color2k) in-browser.
-  if (!protomapsPromise) protomapsPromise = import("https://esm.sh/protomaps-leaflet@4.0.1");
+  // protomaps-leaflet@4 ships ESM only — no UMD bundle. jsDelivr's /+esm
+  // endpoint bundles it with its peer deps (pbf, vector-tile, point-geometry,
+  // color2k) so the browser only pays one round trip. esm.sh was unreliable.
+  if (!protomapsPromise) protomapsPromise = import("https://cdn.jsdelivr.net/npm/protomaps-leaflet@4.0.1/+esm");
   return protomapsPromise;
 }
 
