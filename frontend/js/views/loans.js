@@ -136,12 +136,10 @@ async function openCreateLoan(el, ctx) {
   const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading clients and products…"));
   const { close } = modal("New loan", body, [{ label: "Cancel" }]);
   try {
-    const [clientsRes, productsRes] = await Promise.all([
+    const [clients, products] = await Promise.all([
       get("/api/loans/clients"),
       get("/api/loans/products"),
     ]);
-    const clients = clientsRes?.data ?? [];
-    const products = productsRes?.data ?? [];
     if (!clients.length) {
       clear(body, h("p", { class: "muted" }, "No active Mapene clients. Create a client in Mapene first."));
       return;
