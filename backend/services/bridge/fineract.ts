@@ -111,11 +111,15 @@ function statusFrom(raw: unknown): FineractLoanSummary["status"] {
 
 /** Compute DPD = today − earliest unpaid dueDate. 0 when nothing is overdue. */
 function dpdFromSchedule(schedule: unknown, todayISO: string): number {
-  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown }> } | undefined)?.periods ?? [];
-  // Earliest unpaid period that has a dueDate (skip the "disbursement" period).
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
+  // Earliest unpaid period that has a dueDate. Skip the disbursement sentinel
+  // (period 0, totalDue=0, no `complete` flag) — otherwise the day after
+  // disbursement we'd report DPD=1 even when the first installment isn't due
+  // for another month.
   for (const p of periods) {
     const due = arrToDate(p.dueDate);
     if (!due) continue;
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
     if (p.complete || p.obligationsMetOnDate) continue;
     const diff = daysBetween(todayISO, due);
     return Math.max(0, diff);
@@ -123,12 +127,17 @@ function dpdFromSchedule(schedule: unknown, todayISO: string): number {
   return 0;
 }
 
-/** Next unpaid due date (single-balloon loans → the one balloon date). */
+/** Next unpaid due date (single-balloon loans → the one balloon date).
+ *  Fineract prepends a "period 0" row representing the disbursement itself
+ *  (totalDueForPeriod: 0, dueDate = disbursement date, no `complete` flag).
+ *  We MUST skip it — otherwise the detail view shows "next payment:
+ *  <disbursement date>" instead of the first real installment. */
 function nextDueFromSchedule(schedule: unknown): string | null {
-  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown }> } | undefined)?.periods ?? [];
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
   for (const p of periods) {
     const due = arrToDate(p.dueDate);
     if (!due) continue;
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue; // disbursement marker
     if (p.complete || p.obligationsMetOnDate) continue;
     return due;
   }
@@ -156,6 +165,8 @@ function nextInstallmentFromSchedule(schedule: unknown): number {
   for (const p of periods) {
     const due = arrToDate(p.dueDate);
     if (!due) continue;
+    // Skip the disbursement sentinel (period 0, totalDue=0); see nextDueFromSchedule.
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
     if (p.complete || p.obligationsMetOnDate) continue;
     // Prefer outstanding (handles partial-payment state), fall back to totalDue.
     return Number(p.totalOutstandingForPeriod ?? p.totalDueForPeriod ?? 0);
