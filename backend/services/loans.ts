@@ -239,14 +239,15 @@ export async function linkAndDisburse(
   }
 
   // Pull the draft row (if this loan was created through the platform) so we
-  // can carry the admin-supplied client_email through to loan_links; the
-  // reminder path reads only from loan_links.client_email.
-  const draft = await run<Array<{ client_email: string | null; client_name: string | null }>>(
-    db().from("loan_drafts").select("client_email, client_name")
+  // can carry the admin-supplied contact fields through to loan_links; the
+  // reminder path reads only from loan_links.
+  const draft = await run<Array<{ client_email: string | null; client_name: string | null; client_mobile: string | null }>>(
+    db().from("loan_drafts").select("client_email, client_name, client_mobile")
       .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
   );
   const draftEmail = draft[0]?.client_email ?? null;
   const draftName = draft[0]?.client_name ?? null;
+  const draftMobile = draft[0]?.client_mobile ?? null;
 
   // Step 2: pre-create loan_links row so the DISBURSE webhook finds it on
   // first delivery. Carry client identity if we have it — the automation
@@ -263,9 +264,10 @@ export async function linkAndDisburse(
       due_on: loan.dueOn ?? null,
       status: "active",
       client_name: loan.clientName ?? draftName ?? null,
-      // Prefer the admin's typed-in email over whatever Fineract stamped
-      // (admin probably knows which address the customer monitors).
+      // Prefer the admin's typed-in contacts over whatever Fineract stamped
+      // (admin probably knows which address/number the customer monitors).
       client_email: draftEmail ?? loan.clientEmail ?? null,
+      client_mobile: draftMobile ?? null,
     }));
   } catch (e) {
     log("warn", "loans.loan_link_insert_failed", { loan_id: loanId, device_id: deviceId, error: String(e) });
@@ -301,6 +303,10 @@ export interface CreateLoanServiceInput {
   /** Admin-supplied address for repayment reminders; promoted to
    *  loan_links.client_email on linkAndDisburse so fireReminderEmail finds it. */
   clientEmail?: string | null;
+  /** Admin-supplied mobile number; stored for SMS reminders (not yet wired)
+   *  and shown in the Loans detail modal. Promoted to loan_links.client_mobile
+   *  on linkAndDisburse. */
+  clientMobile?: string | null;
   numberOfRepayments?: number;
   repaymentEvery?: number;
   repaymentFrequencyType?: number;
@@ -382,6 +388,7 @@ export async function createLoan(
     client_id: input.clientId,
     client_name: clientName,
     client_email: input.clientEmail ?? null,
+    client_mobile: input.clientMobile ?? null,
     principal: input.principal,
     expected_disbursement_on: input.expectedDisbursementOn,
   }));
@@ -613,16 +620,25 @@ export async function getTrackingDetail(enterpriseId: string, loanId: string): P
 
   // Pull the loan_links row (and its device) for the enterprise-scoped device identity.
   // Keep the query tolerant: a still-pending loan has no loan_links row yet.
-  const [linkRow] = await run<LoanLinkDeviceRow[]>(
+  const [linkRow] = await run<Array<LoanLinkDeviceRow & { client_mobile: string | null }>>(
     db().from("loan_links")
-      .select("fineract_loan_id, status, client_name, client_email, external_id, devices(id, device_name, model, imei, serial_number, platform)")
+      .select("fineract_loan_id, status, client_name, client_email, client_mobile, external_id, devices(id, device_name, model, imei, serial_number, platform)")
       .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
   );
   const d = unwrapDevice(linkRow?.devices);
 
-  // Client mobile from Fineract live — not cached on loan_links today.
-  let clientMobile: string | null = null;
-  if (loan.clientId) {
+  // Client mobile: prefer the admin-typed value stored on loan_links. Fall
+  // back to live Fineract (same chain the Loans list uses). Pending-only loans
+  // (no loan_link yet) fall back to loan_drafts.client_mobile.
+  let clientMobile: string | null = linkRow?.client_mobile ?? null;
+  if (!clientMobile) {
+    const [draft] = await run<Array<{ client_mobile: string | null }>>(
+      db().from("loan_drafts").select("client_mobile")
+        .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
+    );
+    clientMobile = draft?.client_mobile ?? null;
+  }
+  if (!clientMobile && loan.clientId) {
     try {
       const c = await getClient(loan.clientId);
       if (c) clientMobile = c.mobileNo ?? null;

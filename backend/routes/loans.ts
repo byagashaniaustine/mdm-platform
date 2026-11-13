@@ -64,10 +64,17 @@ export function loanRoutes() {
     if (clientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "client_email is not a valid email address" } }, 400);
     }
+    const rawMobile = (b as Record<string, unknown>).client_mobile;
+    const clientMobile = typeof rawMobile === "string" && rawMobile.trim() ? rawMobile.trim() : null;
+    // Loose MSISDN check: optional leading +, 8-15 digits. Accepts +255712345678,
+    // 0712345678, or 255712345678 — we don't normalize here, SMS providers do.
+    if (clientMobile && !/^\+?\d[\d\s-]{6,19}$/.test(clientMobile)) {
+      return c.json({ error: { code: "VALIDATION_FAILED", message: "client_mobile must be 8-15 digits, optional leading +" } }, 400);
+    }
     const result = await createLoan(
       c.get("session").enterpriseId,
       c.get("session").adminId ?? null,
-      { clientId, productId, principal, expectedDisbursementOn, clientEmail },
+      { clientId, productId, principal, expectedDisbursementOn, clientEmail, clientMobile },
     );
     return c.json({ data: result });
   });

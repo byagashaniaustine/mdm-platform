@@ -171,6 +171,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
   const principalInp = input({ type: "number", step: "1", min: "0", placeholder: "e.g. 2500000" });
   const dateInp = input({ type: "date", value: todayISO() });
   const emailInp = input({ type: "email", maxlength: 255, placeholder: "customer@example.com" });
+  const phoneInp = input({ type: "tel", maxlength: 20, placeholder: "+255 712 345 678", pattern: "\\+?\\d[\\d\\s-]{6,19}" });
 
   const bounds = h("p", { class: "hint" }, "");
   const updateBounds = () => {
@@ -200,6 +201,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
         principal: Number(principalInp.value),
         expected_disbursement_on: dateInp.value,
         client_email: emailInp.value.trim() || null,
+        client_mobile: phoneInp.value.trim() || null,
       };
       onSubmit(payload).finally(() => {
         submit.disabled = false;
@@ -212,6 +214,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
     field("Principal", principalInp, h("span", {}, "The amount financed, before interest.")),
     field("Expected disbursement date", dateInp),
     field("Customer email (reminders)", emailInp, h("span", {}, "Payment reminders fire when the loan hits Due-2D or Overdue. Leave blank to fall back to the device user's email.")),
+    field("Customer phone", phoneInp, h("span", {}, "Stored for SMS reminders (not wired yet) and surfaced in the loan's detail modal. +country code preferred.")),
     h("div", { class: "actions", style: "justify-content:flex-end;gap:8px" }, submit),
   );
   clear(body, form);
