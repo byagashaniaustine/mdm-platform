@@ -8,17 +8,25 @@ const PMTILES_URL = "https://xoimjxsmmesvboebrtyu.supabase.co/storage/v1/object/
 const TILE_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · <a href="https://protomaps.com" target="_blank" rel="noopener">Protomaps</a>';
 const STALE_MS = 6 * 3600_000;
 
+let protomapsPromise = null;
+function loadProtomaps() {
+  // protomaps-leaflet@4 ships ESM only — no UMD bundle. esm.sh resolves peer
+  // deps (pbf, vector-tile, point-geometry, color2k) in-browser.
+  if (!protomapsPromise) protomapsPromise = import("https://esm.sh/protomaps-leaflet@4.0.1");
+  return protomapsPromise;
+}
+
 function leafletReady() {
-  if (window.L && window.protomapsL) return Promise.resolve(window.L);
-  return new Promise((resolve, reject) => {
+  const base = window.L ? Promise.resolve(window.L) : new Promise((resolve, reject) => {
     const t0 = Date.now();
     const check = () => {
-      if (window.L && window.protomapsL) resolve(window.L);
+      if (window.L) resolve(window.L);
       else if (Date.now() - t0 > 10_000) reject(new Error("Map library failed to load"));
       else setTimeout(check, 50);
     };
     check();
   });
+  return Promise.all([base, loadProtomaps()]).then(([L, pm]) => ({ L, pm }));
 }
 
 /** Render devices as dots and geofences as circles on an OpenStreetMap tile layer. */
@@ -28,7 +36,7 @@ function tileMap(points, fences, names) {
 
   queueMicrotask(async () => {
     try {
-      const L = await leafletReady();
+      const { L, pm } = await leafletReady();
       if (!container.isConnected) return;
       const css = getComputedStyle(document.documentElement);
       const ok = css.getPropertyValue("--ok").trim() || "#3F6B4F";
@@ -38,7 +46,7 @@ function tileMap(points, fences, names) {
       const stone = css.getPropertyValue("--stone").trim() || "#BBB7B6";
 
       const map = L.map(container, { scrollWheelZoom: false, zoomControl: true, maxZoom: 15 });
-      window.protomapsL.leafletLayer({
+      pm.leafletLayer({
         url: PMTILES_URL,
         theme: "light",
         attribution: TILE_ATTRIB,
