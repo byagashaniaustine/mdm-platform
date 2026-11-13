@@ -238,6 +238,16 @@ export async function linkAndDisburse(
     }
   }
 
+  // Pull the draft row (if this loan was created through the platform) so we
+  // can carry the admin-supplied client_email through to loan_links; the
+  // reminder path reads only from loan_links.client_email.
+  const draft = await run<Array<{ client_email: string | null; client_name: string | null }>>(
+    db().from("loan_drafts").select("client_email, client_name")
+      .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).limit(1),
+  );
+  const draftEmail = draft[0]?.client_email ?? null;
+  const draftName = draft[0]?.client_name ?? null;
+
   // Step 2: pre-create loan_links row so the DISBURSE webhook finds it on
   // first delivery. Carry client identity if we have it — the automation
   // enrichment pass will backfill anything missing on subsequent webhooks.
@@ -252,8 +262,10 @@ export async function linkAndDisburse(
       disbursed_on: loan.disbursedOn ?? today,
       due_on: loan.dueOn ?? null,
       status: "active",
-      client_name: loan.clientName ?? null,
-      client_email: loan.clientEmail ?? null,
+      client_name: loan.clientName ?? draftName ?? null,
+      // Prefer the admin's typed-in email over whatever Fineract stamped
+      // (admin probably knows which address the customer monitors).
+      client_email: draftEmail ?? loan.clientEmail ?? null,
     }));
   } catch (e) {
     log("warn", "loans.loan_link_insert_failed", { loan_id: loanId, device_id: deviceId, error: String(e) });
@@ -286,6 +298,9 @@ export interface CreateLoanServiceInput {
   productId: number;
   principal: number;
   expectedDisbursementOn: string; // YYYY-MM-DD
+  /** Admin-supplied address for repayment reminders; promoted to
+   *  loan_links.client_email on linkAndDisburse so fireReminderEmail finds it. */
+  clientEmail?: string | null;
   numberOfRepayments?: number;
   repaymentEvery?: number;
   repaymentFrequencyType?: number;
@@ -366,6 +381,7 @@ export async function createLoan(
     product_name: product.name,
     client_id: input.clientId,
     client_name: clientName,
+    client_email: input.clientEmail ?? null,
     principal: input.principal,
     expected_disbursement_on: input.expectedDisbursementOn,
   }));

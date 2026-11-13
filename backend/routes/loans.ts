@@ -59,10 +59,15 @@ export function loanRoutes() {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "principal must be a positive number" } }, 400);
     }
     const expectedDisbursementOn = str(b, "expected_disbursement_on", { max: 10 });
+    const rawEmail = (b as Record<string, unknown>).client_email;
+    const clientEmail = typeof rawEmail === "string" && rawEmail.trim() ? rawEmail.trim() : null;
+    if (clientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
+      return c.json({ error: { code: "VALIDATION_FAILED", message: "client_email is not a valid email address" } }, 400);
+    }
     const result = await createLoan(
       c.get("session").enterpriseId,
       c.get("session").adminId ?? null,
-      { clientId, productId, principal, expectedDisbursementOn },
+      { clientId, productId, principal, expectedDisbursementOn, clientEmail },
     );
     return c.json({ data: result });
   });

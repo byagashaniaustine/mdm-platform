@@ -170,6 +170,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
   const productSel = select(products.map((p) => ({ value: String(p.id), label: productLabel(p) })));
   const principalInp = input({ type: "number", step: "1", min: "0", placeholder: "e.g. 2500000" });
   const dateInp = input({ type: "date", value: todayISO() });
+  const emailInp = input({ type: "email", maxlength: 255, placeholder: "customer@example.com" });
 
   const bounds = h("p", { class: "hint" }, "");
   const updateBounds = () => {
@@ -198,6 +199,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
         product_id: Number(productSel.value),
         principal: Number(principalInp.value),
         expected_disbursement_on: dateInp.value,
+        client_email: emailInp.value.trim() || null,
       };
       onSubmit(payload).finally(() => {
         submit.disabled = false;
@@ -209,6 +211,7 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
     field("Loan product", productSel, bounds),
     field("Principal", principalInp, h("span", {}, "The amount financed, before interest.")),
     field("Expected disbursement date", dateInp),
+    field("Customer email (reminders)", emailInp, h("span", {}, "Payment reminders fire when the loan hits Due-2D or Overdue. Leave blank to fall back to the device user's email.")),
     h("div", { class: "actions", style: "justify-content:flex-end;gap:8px" }, submit),
   );
   clear(body, form);
