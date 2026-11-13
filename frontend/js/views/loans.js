@@ -3,7 +3,7 @@
 // full repayment schedule and lock-event history. Pending rows keep the
 // original "Link & disburse" path accessible from the detail modal.
 import { get, post } from "../api.js";
-import { badge, clear, emptyState, h, loading, modal, pageHeader, select, table, toast, toastError } from "../ui.js";
+import { badge, clear, emptyState, field, h, input, loading, modal, pageHeader, select, table, toast, toastError } from "../ui.js";
 
 export async function loansView(el, ctx) {
   clear(el, loading());
@@ -11,13 +11,17 @@ export async function loansView(el, ctx) {
   el.__viewToken = mountToken;
 
   const refresh = () => loansView(el, ctx);
+  const admin = ctx.can("admin");
   const refreshBtn = h("button", { class: "btn", type: "button", onclick: refresh }, "Refresh");
+  const createBtn = admin
+    ? h("button", { class: "btn btn-primary", type: "button", onclick: () => openCreateLoan(el, ctx) }, "+ New loan")
+    : null;
   const contentBox = h("div");
   clear(el,
     pageHeader(
       "Loans",
-      "Every Mapene loan tied to this enterprise. Pending rows can be linked to a device and disbursed; active rows show live repayment progress and days overdue.",
-      [refreshBtn],
+      "Loans you've created for this enterprise. Pending rows need a device linked and a disbursal; active rows show live repayment progress and days overdue.",
+      [createBtn, refreshBtn].filter(Boolean),
     ),
     contentBox,
   );
@@ -26,17 +30,14 @@ export async function loansView(el, ctx) {
     const payload = await get("/api/loans/all");
     if (el.__viewToken !== mountToken) return;
     const rows = payload?.rows ?? [];
-    const warnings = payload?.warnings ?? {};
-    const banner = warnings.pendingUnavailable ? pendingUnavailableBanner(warnings.pendingError) : null;
     if (!rows.length) {
       clear(contentBox,
-        banner,
         emptyState(
           "No loans yet",
-          warnings.pendingUnavailable
-            ? "Linked loans load from our database, but pending loans need Mapene — and Mapene isn't answering right now. Retry once the banner above clears."
-            : "When Mapene approves a loan it will appear here. Once disbursed, repayment progress shows live.",
-          refreshBtn,
+          admin
+            ? "Click + New loan to pick a client and loan product. The loan is created in Mapene and approved immediately; you then link it to a device and disburse."
+            : "Ask an admin to create a loan for this enterprise.",
+          createBtn ?? refreshBtn,
         ),
       );
       return;
@@ -99,7 +100,7 @@ export async function loansView(el, ctx) {
         }),
       },
     );
-    clear(contentBox, banner, tbl);
+    clear(contentBox, tbl);
   } catch (err) {
     toastError(err);
     clear(contentBox, emptyState("Could not load loans", String(err?.message ?? err), refreshBtn));
@@ -125,21 +126,109 @@ const STATUS_LABEL = {
   unknown: "—",
 };
 
-function pendingUnavailableBanner(code) {
-  // Shown when listAll succeeds but listPendingDisbursal didn't. Admins were
-  // seeing "no pending loans" and assuming the link flow was broken; this
-  // tells them the real cause (Fineract unreachable / breaker open / auth).
-  const detail = code === "FINERACT_UNAVAILABLE"
-    ? "Mapene (istore.lms.bsa.ai) isn't responding — pending loans can't be listed. Linked loans below still load from our database. Retry in a minute; if it persists, check Mapene / the fineract circuit breaker."
-    : code === "FINERACT_UNAUTHORIZED"
-    ? "Mapene rejected our credentials — pending loans can't be listed. Linked loans below still load from our database. Check FINERACT_USERNAME / FINERACT_PASSWORD."
-    : `Mapene couldn't be reached for pending loans (${code ?? "unknown"}). Linked loans below still load from our database.`;
-  return h("div", { class: "banner banner-warn" },
-    h("div", { class: "stack" },
-      h("strong", {}, "Pending loans unavailable"),
-      h("span", { class: "small" }, detail),
-    ),
+// ----------------------------------------------------- Create loan (admin UI)
+// Two-step modal:
+//   1. First render loads clients + products from Fineract in parallel;
+//      renders a form once both resolve.
+//   2. Submit → POST /api/loans/create → the new loan appears in Pending; the
+//      admin then clicks the row and uses the existing Link & disburse flow.
+async function openCreateLoan(el, ctx) {
+  const body = h("div", { class: "stack" }, h("p", { class: "muted" }, "Loading clients and products…"));
+  const { close } = modal("New loan", body, [{ label: "Cancel" }]);
+  try {
+    const [clientsRes, productsRes] = await Promise.all([
+      get("/api/loans/clients"),
+      get("/api/loans/products"),
+    ]);
+    const clients = clientsRes?.data ?? [];
+    const products = productsRes?.data ?? [];
+    if (!clients.length) {
+      clear(body, h("p", { class: "muted" }, "No active Mapene clients. Create a client in Mapene first."));
+      return;
+    }
+    if (!products.length) {
+      clear(body, h("p", { class: "muted" }, "No loan products configured in Mapene. Add at least one product first."));
+      return;
+    }
+    renderCreateLoanForm(body, clients, products, async (payload) => {
+      try {
+        const res = await post("/api/loans/create", payload);
+        toast(`Loan #${res?.data?.loanId ?? "?"} created — ready to link + disburse.`);
+        close();
+        loansView(el, ctx);
+      } catch (err) {
+        toastError(err);
+      }
+    });
+  } catch (err) {
+    clear(body, h("p", { class: "error" }, err?.message ?? String(err)));
+  }
+}
+
+function renderCreateLoanForm(body, clients, products, onSubmit) {
+  const clientSel = select(
+    clients.map((c) => ({ value: c.id, label: c.mobileNo ? `${c.displayName} · ${c.mobileNo}` : c.displayName })),
   );
+  const productSel = select(products.map((p) => ({ value: String(p.id), label: productLabel(p) })));
+  const principalInp = input({ type: "number", step: "1", min: "0", placeholder: "e.g. 2500000" });
+  const dateInp = input({ type: "date", value: todayISO() });
+
+  const bounds = h("p", { class: "hint" }, "");
+  const updateBounds = () => {
+    const p = products.find((x) => String(x.id) === productSel.value);
+    if (!p) { bounds.textContent = ""; return; }
+    const parts = [];
+    if (p.minPrincipal != null) parts.push(`min ${fmtMoney(p.minPrincipal)}`);
+    if (p.maxPrincipal != null) parts.push(`max ${fmtMoney(p.maxPrincipal)}`);
+    if (p.defaultPrincipal != null && !principalInp.value) principalInp.value = String(p.defaultPrincipal);
+    bounds.textContent = parts.length
+      ? `${p.currencyCode ?? ""} · ${parts.join(" · ")} · ${p.numberOfRepayments ?? "—"} × every ${p.repaymentEvery ?? 1} ${p.repaymentFrequencyLabel ?? ""}`.trim()
+      : "";
+  };
+  productSel.addEventListener("change", updateBounds);
+  queueMicrotask(updateBounds);
+
+  const submit = h("button", { class: "btn btn-primary", type: "submit" }, "Create loan");
+  const form = h("form", {
+    class: "stack",
+    onsubmit: (e) => {
+      e.preventDefault();
+      submit.disabled = true;
+      submit.textContent = "Creating…";
+      const payload = {
+        client_id: clientSel.value,
+        product_id: Number(productSel.value),
+        principal: Number(principalInp.value),
+        expected_disbursement_on: dateInp.value,
+      };
+      onSubmit(payload).finally(() => {
+        submit.disabled = false;
+        submit.textContent = "Create loan";
+      });
+    },
+  },
+    field("Borrower", clientSel),
+    field("Loan product", productSel, bounds),
+    field("Principal", principalInp, h("span", {}, "The amount financed, before interest.")),
+    field("Expected disbursement date", dateInp),
+    h("div", { class: "actions", style: "justify-content:flex-end;gap:8px" }, submit),
+  );
+  clear(body, form);
+}
+
+function productLabel(p) {
+  const freq = p.repaymentFrequencyLabel ?? "";
+  const terms = p.numberOfRepayments != null ? `${p.numberOfRepayments}×` : "";
+  const bits = [p.name];
+  if (terms || freq) bits.push(`${terms} ${freq}`.trim());
+  return bits.filter(Boolean).join(" · ");
+}
+
+function todayISO() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
 }
 
 function statusTag(loan) {
