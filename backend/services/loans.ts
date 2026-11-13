@@ -12,6 +12,7 @@ import { log } from "../lib/log.ts";
 import {
   addLoanNote,
   createAndApproveLoan,
+  createFineractClient,
   disburseLoan,
   fetchRawLoan,
   type FineractLoanSummary,
@@ -295,8 +296,19 @@ export async function linkAndDisburse(
 
 // -------------------------------------------------- Platform-initiated create
 
+export interface NewBorrowerInput {
+  firstname: string;
+  middlename?: string | null;
+  lastname: string;
+  mobileNo?: string | null;
+  emailAddress?: string | null;
+}
+
 export interface CreateLoanServiceInput {
-  clientId: string;
+  /** Either pick an existing Fineract client… */
+  clientId?: string;
+  /** …or supply fields to create one inline. Exactly one of the two is required. */
+  newBorrower?: NewBorrowerInput;
   productId: number;
   principal: number;
   expectedDisbursementOn: string; // YYYY-MM-DD
@@ -327,18 +339,27 @@ export async function listClientsForCreate(): Promise<FineractClientRef[]> {
  * Create a loan in Fineract (POST + approve), then record a draft row so it
  * appears in the Pending section of the Loans page. Device binding + disburse
  * happen later via the existing Link & disburse flow.
+ *
+ * Accepts either an existing Fineract clientId or a NewBorrowerInput. When the
+ * caller supplies NewBorrowerInput, we POST /clients to Fineract first and
+ * feed the returned id into the loan payload. Exactly one of the two inputs
+ * must be provided.
  */
 export async function createLoan(
   enterpriseId: string,
   adminId: string | null,
   input: CreateLoanServiceInput,
-): Promise<{ loanId: string }> {
+): Promise<{ loanId: string; clientId: string; createdClient: boolean }> {
   if (!(input.principal > 0)) fail("VALIDATION_FAILED", "principal must be > 0");
+  if (!input.clientId && !input.newBorrower) {
+    fail("VALIDATION_FAILED", "Provide either client_id or new_borrower.");
+  }
+  if (input.clientId && input.newBorrower) {
+    fail("VALIDATION_FAILED", "Provide client_id OR new_borrower, not both.");
+  }
 
-  // Resolve product + client so the draft row carries human-readable context.
-  // These are strictly nice-to-have — we proceed on fetch failure with nulls.
+  // Resolve product so the draft row carries human-readable context.
   let product: FineractLoanProductRef | null = null;
-  let clientName: string | null = null;
   try {
     const products = await listLoanProducts();
     product = products.find((p) => p.id === input.productId) ?? null;
@@ -355,16 +376,41 @@ export async function createLoan(
     fail("VALIDATION_FAILED", `Principal ${input.principal} is above the product maximum ${product.maxPrincipal}.`);
   }
 
-  try {
-    const c = await getClient(input.clientId);
-    if (c) clientName = c.displayName ?? null;
-  } catch (e) {
-    log("warn", "loans.create.client_lookup_failed", { client_id: input.clientId, error: String(e) });
+  const dateDMY = formatDarDate(parseISODate(input.expectedDisbursementOn));
+
+  // Branch: resolve clientId. If the admin supplied new-borrower fields,
+  // POST /clients to Fineract and use the returned id. Otherwise use the
+  // picker's clientId straight through.
+  let resolvedClientId: string;
+  let clientName: string | null = null;
+  let createdClient = false;
+  if (input.newBorrower) {
+    const nb = input.newBorrower;
+    if (!nb.firstname.trim() || !nb.lastname.trim()) {
+      fail("VALIDATION_FAILED", "firstname and lastname are required for a new borrower.");
+    }
+    resolvedClientId = await createFineractClient({
+      firstname: nb.firstname.trim(),
+      middlename: nb.middlename?.trim() || null,
+      lastname: nb.lastname.trim(),
+      mobileNo: nb.mobileNo || null,
+      emailAddress: nb.emailAddress || null,
+      activationDateDMY: dateDMY,
+    });
+    clientName = `${nb.firstname.trim()}${nb.middlename ? ` ${nb.middlename.trim()}` : ""} ${nb.lastname.trim()}`;
+    createdClient = true;
+  } else {
+    resolvedClientId = input.clientId!;
+    try {
+      const c = await getClient(resolvedClientId);
+      if (c) clientName = c.displayName ?? null;
+    } catch (e) {
+      log("warn", "loans.create.client_lookup_failed", { client_id: resolvedClientId, error: String(e) });
+    }
   }
 
-  const dateDMY = formatDarDate(parseISODate(input.expectedDisbursementOn));
   const loanId = await createAndApproveLoan({
-    clientId: input.clientId,
+    clientId: resolvedClientId,
     productId: input.productId,
     principal: input.principal,
     numberOfRepayments: input.numberOfRepayments ?? product.numberOfRepayments ?? undefined,
@@ -385,15 +431,15 @@ export async function createLoan(
     created_by: adminId,
     product_id: input.productId,
     product_name: product.name,
-    client_id: input.clientId,
+    client_id: resolvedClientId,
     client_name: clientName,
-    client_email: input.clientEmail ?? null,
-    client_mobile: input.clientMobile ?? null,
+    client_email: input.clientEmail ?? input.newBorrower?.emailAddress ?? null,
+    client_mobile: input.clientMobile ?? input.newBorrower?.mobileNo ?? null,
     principal: input.principal,
     expected_disbursement_on: input.expectedDisbursementOn,
   }));
 
-  return { loanId };
+  return { loanId, clientId: resolvedClientId, createdClient };
 }
 
 function parseISODate(iso: string): Date {

@@ -46,35 +46,60 @@ export function loanRoutes() {
   // Create a new loan in Fineract (POST + approve) and record a draft row.
   // The returned loanId appears in Pending; admin then calls link-and-disburse
   // below to bind a device and fire the disbursal.
+  //
+  // Body accepts EITHER client_id (existing Fineract client) OR new_borrower
+  // ({firstname, lastname, middlename?, mobileNo?, emailAddress?}); the latter
+  // creates the client in Fineract first.
   r.post("/create", requireRole("admin"), async (c) => {
-    const b = await readJson(c.req.raw);
-    const clientId = str(b, "client_id", { max: 32 });
-    const productIdRaw = (b as Record<string, unknown>).product_id;
-    const productId = Number(productIdRaw);
+    const b = await readJson(c.req.raw) as Record<string, unknown>;
+    const productId = Number(b.product_id);
     if (!Number.isInteger(productId) || productId <= 0) {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "product_id must be a positive integer" } }, 400);
     }
-    const principal = Number((b as Record<string, unknown>).principal);
+    const principal = Number(b.principal);
     if (!(principal > 0)) {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "principal must be a positive number" } }, 400);
     }
     const expectedDisbursementOn = str(b, "expected_disbursement_on", { max: 10 });
-    const rawEmail = (b as Record<string, unknown>).client_email;
-    const clientEmail = typeof rawEmail === "string" && rawEmail.trim() ? rawEmail.trim() : null;
-    if (clientEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
+    const clientEmail = normalizeEmail(b.client_email);
+    if (clientEmail === false) {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "client_email is not a valid email address" } }, 400);
     }
-    const rawMobile = (b as Record<string, unknown>).client_mobile;
-    const clientMobile = typeof rawMobile === "string" && rawMobile.trim() ? rawMobile.trim() : null;
-    // Loose MSISDN check: optional leading +, 8-15 digits. Accepts +255712345678,
-    // 0712345678, or 255712345678 — we don't normalize here, SMS providers do.
-    if (clientMobile && !/^\+?\d[\d\s-]{6,19}$/.test(clientMobile)) {
+    const clientMobile = normalizeMobile(b.client_mobile);
+    if (clientMobile === false) {
       return c.json({ error: { code: "VALIDATION_FAILED", message: "client_mobile must be 8-15 digits, optional leading +" } }, 400);
     }
+
+    const rawClientId = b.client_id;
+    const clientId = typeof rawClientId === "string" && rawClientId.trim() ? rawClientId.trim() : null;
+    const newBorrowerRaw = b.new_borrower as Record<string, unknown> | undefined;
+    let newBorrower: { firstname: string; middlename?: string | null; lastname: string; mobileNo?: string | null; emailAddress?: string | null } | undefined;
+    if (newBorrowerRaw) {
+      const fn = typeof newBorrowerRaw.firstname === "string" ? newBorrowerRaw.firstname.trim() : "";
+      const ln = typeof newBorrowerRaw.lastname === "string" ? newBorrowerRaw.lastname.trim() : "";
+      if (!fn || !ln) {
+        return c.json({ error: { code: "VALIDATION_FAILED", message: "new_borrower.firstname and new_borrower.lastname are required" } }, 400);
+      }
+      const mn = typeof newBorrowerRaw.middlename === "string" ? newBorrowerRaw.middlename.trim() : null;
+      newBorrower = {
+        firstname: fn,
+        middlename: mn || null,
+        lastname: ln,
+        // Default the new client's contact fields to the reminder-side values
+        // so the Fineract client record is populated even if the admin only
+        // typed them once.
+        mobileNo: (typeof newBorrowerRaw.mobileNo === "string" && newBorrowerRaw.mobileNo.trim()) ? newBorrowerRaw.mobileNo.trim() : clientMobile,
+        emailAddress: (typeof newBorrowerRaw.emailAddress === "string" && newBorrowerRaw.emailAddress.trim()) ? newBorrowerRaw.emailAddress.trim() : clientEmail,
+      };
+    }
+    if (!clientId && !newBorrower) {
+      return c.json({ error: { code: "VALIDATION_FAILED", message: "Provide either client_id or new_borrower." } }, 400);
+    }
+
     const result = await createLoan(
       c.get("session").enterpriseId,
       c.get("session").adminId ?? null,
-      { clientId, productId, principal, expectedDisbursementOn, clientEmail, clientMobile },
+      { clientId: clientId ?? undefined, newBorrower, productId, principal, expectedDisbursementOn, clientEmail: clientEmail ?? undefined, clientMobile: clientMobile ?? undefined },
     );
     return c.json({ data: result });
   });
@@ -89,4 +114,16 @@ export function loanRoutes() {
   });
 
   return r;
+}
+
+/** Returns null on empty, false on invalid, trimmed string on valid. */
+function normalizeEmail(v: unknown): string | null | false {
+  if (typeof v !== "string" || !v.trim()) return null;
+  const s = v.trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : false;
+}
+function normalizeMobile(v: unknown): string | null | false {
+  if (typeof v !== "string" || !v.trim()) return null;
+  const s = v.trim();
+  return /^\+?\d[\d\s-]{6,19}$/.test(s) ? s : false;
 }

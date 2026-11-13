@@ -140,10 +140,6 @@ async function openCreateLoan(el, ctx) {
       get("/api/loans/clients"),
       get("/api/loans/products"),
     ]);
-    if (!clients.length) {
-      clear(body, h("p", { class: "muted" }, "No active Mapene clients. Create a client in Mapene first."));
-      return;
-    }
     if (!products.length) {
       clear(body, h("p", { class: "muted" }, "No loan products configured in Mapene. Add at least one product first."));
       return;
@@ -164,9 +160,31 @@ async function openCreateLoan(el, ctx) {
 }
 
 function renderCreateLoanForm(body, clients, products, onSubmit) {
-  const clientSel = select(
-    clients.map((c) => ({ value: c.id, label: c.mobileNo ? `${c.displayName} · ${c.mobileNo}` : c.displayName })),
+  // Borrower picker: "+ New borrower" is always the first option; existing
+  // Mapene clients follow. Picking "new" reveals firstname/lastname inputs.
+  const NEW_SENTINEL = "__new__";
+  const clientSel = select([
+    { value: NEW_SENTINEL, label: "+ New borrower…" },
+    ...clients.map((c) => ({ value: c.id, label: c.mobileNo ? `${c.displayName} · ${c.mobileNo}` : c.displayName })),
+  ]);
+  const firstInp = input({ maxlength: 60, placeholder: "First name", autocomplete: "given-name" });
+  const middleInp = input({ maxlength: 60, placeholder: "Middle name (optional)", autocomplete: "additional-name" });
+  const lastInp = input({ maxlength: 60, placeholder: "Last name", autocomplete: "family-name" });
+  const newBorrowerFields = h("div", { class: "stack", style: "padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--ivory)" },
+    h("p", { class: "muted small" }, "New borrower — created in Mapene before the loan. Email + phone below double as the Mapene client contact fields."),
+    field("First name", firstInp),
+    field("Middle name", middleInp),
+    field("Last name", lastInp),
   );
+  const toggleBorrowerFields = () => {
+    const show = clientSel.value === NEW_SENTINEL;
+    newBorrowerFields.style.display = show ? "" : "none";
+    firstInp.required = show;
+    lastInp.required = show;
+  };
+  clientSel.addEventListener("change", toggleBorrowerFields);
+  queueMicrotask(toggleBorrowerFields);
+
   const productSel = select(products.map((p) => ({ value: String(p.id), label: productLabel(p) })));
   const principalInp = input({ type: "number", step: "1", min: "0", placeholder: "e.g. 2500000" });
   const dateInp = input({ type: "date", value: todayISO() });
@@ -195,13 +213,26 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
       e.preventDefault();
       submit.disabled = true;
       submit.textContent = "Creating…";
+      const email = emailInp.value.trim() || null;
+      const mobile = phoneInp.value.trim() || null;
+      const isNew = clientSel.value === NEW_SENTINEL;
       const payload = {
-        client_id: clientSel.value,
         product_id: Number(productSel.value),
         principal: Number(principalInp.value),
         expected_disbursement_on: dateInp.value,
-        client_email: emailInp.value.trim() || null,
-        client_mobile: phoneInp.value.trim() || null,
+        client_email: email,
+        client_mobile: mobile,
+        ...(isNew
+          ? {
+              new_borrower: {
+                firstname: firstInp.value.trim(),
+                middlename: middleInp.value.trim() || null,
+                lastname: lastInp.value.trim(),
+                mobileNo: mobile,
+                emailAddress: email,
+              },
+            }
+          : { client_id: clientSel.value }),
       };
       onSubmit(payload).finally(() => {
         submit.disabled = false;
@@ -209,7 +240,8 @@ function renderCreateLoanForm(body, clients, products, onSubmit) {
       });
     },
   },
-    field("Borrower", clientSel),
+    field("Borrower", clientSel, h("span", {}, "Pick an existing Mapene client or choose \"+ New borrower\" to create one.")),
+    newBorrowerFields,
     field("Loan product", productSel, bounds),
     field("Principal", principalInp, h("span", {}, "The amount financed, before interest.")),
     field("Expected disbursement date", dateInp),

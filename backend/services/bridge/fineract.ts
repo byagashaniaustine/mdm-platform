@@ -459,6 +459,50 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+export interface CreateClientInput {
+  firstname: string;
+  middlename?: string | null;
+  lastname: string;
+  mobileNo?: string | null;
+  emailAddress?: string | null;
+  officeId?: number;              // Defaults to 1 (Head Office) at the service layer.
+  /** "dd MMMM yyyy" — Fineract wants active=true + activationDate for the
+   *  client to be usable in the same request. */
+  activationDateDMY: string;
+}
+
+/**
+ * Create and activate a Fineract client in one shot. Returns the new client id
+ * as a string so the loan-creation path can feed it straight into createLoan.
+ */
+export async function createFineractClient(input: CreateClientInput): Promise<string> {
+  const body = {
+    officeId: input.officeId ?? 1,
+    firstname: input.firstname,
+    middlename: input.middlename || undefined,
+    lastname: input.lastname,
+    mobileNo: input.mobileNo || undefined,
+    emailAddress: input.emailAddress || undefined,
+    active: true,
+    activationDate: input.activationDateDMY,
+    dateFormat: "dd MMMM yyyy",
+    locale: "en",
+    legalFormId: 1, // 1 = PERSON (CE 1.15 default enum)
+  };
+  const created = await withBreaker(BREAKER, () =>
+    req<{ clientId: number; resourceId?: number }>(`/clients`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+    { countFailure: isNetworkFailure },
+  );
+  const id = String(created.clientId ?? created.resourceId);
+  if (!id || id === "undefined") {
+    fail("FINERACT_BAD_REQUEST", "Fineract returned no client id from POST /clients");
+  }
+  return id;
+}
+
 export interface CreateLoanInput {
   clientId: string;
   productId: number;
