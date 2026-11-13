@@ -44,16 +44,15 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
     secureHeaders({
       contentSecurityPolicy: {
         defaultSrc: ["'self'"],
-        // unpkg: Leaflet. jsDelivr /+esm: protomaps-leaflet (ESM-only package,
-        // jsDelivr bundles its peer deps in one request).
-        scriptSrc: ["'self'", "https://unpkg.com", "https://cdn.jsdelivr.net"],
+        // unpkg: Leaflet + protomaps-leaflet UMD bundles.
+        scriptSrc: ["'self'", "https://unpkg.com"],
         // 'unsafe-inline' is needed by Leaflet, which positions tiles via inline style="" attributes.
         styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
         // data:/blob: for Leaflet marker SVGs and in-memory canvas tile frames.
         imgSrc: ["'self'", "data:", "blob:"],
-        // Leaflet + protomaps-leaflet source-map fetches (unpkg, jsDelivr) +
-        // range-read of our self-hosted tanzania.pmtiles in Supabase Storage.
-        connectSrc: ["'self'", "https://unpkg.com", "https://cdn.jsdelivr.net", "https://*.supabase.co"],
+        // unpkg source-maps + range-read of our self-hosted tanzania.pmtiles
+        // in Supabase Storage (browser fetches tile byte-ranges directly).
+        connectSrc: ["'self'", "https://unpkg.com", "https://*.supabase.co"],
         frameAncestors: ["'none'"],
         formAction: ["'self'"],
         baseUri: ["'self'"],
