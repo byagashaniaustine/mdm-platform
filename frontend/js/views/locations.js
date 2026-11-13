@@ -1,13 +1,14 @@
 import { api, del, get, post } from "../api.js";
 import { ago, badge, clear, emptyState, field, fmtTime, h, icon, input, loading, modal, pageHeader, responsive, select, toast, toastError } from "../ui.js";
 
-// CartoDB Voyager — colorful OSM-derived raster basemap, zoom 0-22, no API key,
-// free for production use with attribution. Previously tried tile.openstreetmap.org
-// (community server, blocks production) and self-hosted PMTiles via Supabase
-// Storage (z11 cap left streets blocky when zoomed in).
-const TILE_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
-const TILE_SUBDOMAINS = "abcd";
-const TILE_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
+// Esri World Street Map — clean tiles, zoom 0-19, no API key, free for use
+// up to ~1M tiles/month per Esri's terms. Note the {y}/{x} order (Esri's REST
+// path, not the OSM-style {x}/{y}). Previously tried: tile.openstreetmap.org
+// (community server blocks production), self-hosted PMTiles on Supabase
+// (z11 cap left streets blocky), CartoDB (started watermarking keyless use —
+// ETag "wm-*" indicates watermarked tiles).
+const TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}";
+const TILE_ATTRIB = 'Tiles &copy; <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a> &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom, &copy; OpenStreetMap contributors';
 const STALE_MS = 6 * 3600_000;
 
 function leafletReady() {
@@ -42,7 +43,6 @@ function tileMap(points, fences, names) {
       const map = L.map(container, { scrollWheelZoom: false, zoomControl: true });
       L.tileLayer(TILE_URL, {
         maxZoom: 19,
-        subdomains: TILE_SUBDOMAINS,
         attribution: TILE_ATTRIB,
       }).addTo(map);
       L.control.scale({ metric: true, imperial: false }).addTo(map);

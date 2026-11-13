@@ -48,8 +48,8 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
         scriptSrc: ["'self'", "https://unpkg.com"],
         // 'unsafe-inline' is needed by Leaflet, which positions tiles via inline style="" attributes.
         styleSrc: ["'self'", "https://unpkg.com", "'unsafe-inline'"],
-        // CartoDB basemaps: Voyager raster tiles (a-d subdomains).
-        imgSrc: ["'self'", "data:", "blob:", "https://*.basemaps.cartocdn.com"],
+        // Esri ArcGIS Online basemap tiles (World_Street_Map).
+        imgSrc: ["'self'", "data:", "blob:", "https://server.arcgisonline.com"],
         // unpkg: Leaflet fetches its own sourcemap when DevTools is open.
         connectSrc: ["'self'", "https://unpkg.com"],
         frameAncestors: ["'none'"],
