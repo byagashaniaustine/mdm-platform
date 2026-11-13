@@ -121,7 +121,12 @@ function dpdFromSchedule(schedule: unknown, todayISO: string): number {
     if (!due) continue;
     if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
     if (p.complete || p.obligationsMetOnDate) continue;
-    const diff = daysBetween(todayISO, due);
+    // daysBetween(from, to) = to - from. We want today - due (positive when
+    // today is after due, clamp to 0 when due is in the future). Previously
+    // this was daysBetween(todayISO, due) which returned due - today — so
+    // DPD was always 0 for freshly disbursed loans (period-0 masked it)
+    // and future-due periods were reported as "positive DPD" (nonsense).
+    const diff = daysBetween(due, todayISO);
     return Math.max(0, diff);
   }
   return 0;
