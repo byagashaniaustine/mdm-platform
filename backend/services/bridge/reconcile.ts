@@ -184,7 +184,7 @@ export async function reconcileBatch(
       continue;
     }
     const to = tierFor(
-      { status: loan.status === "pending" || loan.status === "approved" || loan.status === "rejected" || loan.status === "unknown" ? "active" : loan.status, dueOn: loan.dueOn, dpd: loan.dpd, productId: loan.productId },
+      { status: loan.status === "pending" || loan.status === "approved" || loan.status === "rejected" || loan.status === "unknown" ? "active" : loan.status, dueOn: loan.dueOn, dpd: loan.dpd, productId: loan.productId, totalRepaid: loan.totalRepaid },
       todayISO,
     );
     const grp = platform ? tierGroups.get(`${to}:${platform}`) ?? null : null;
