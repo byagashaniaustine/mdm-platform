@@ -11,24 +11,33 @@ import { appError, fail } from "../lib/errors.ts";
 import { log } from "../lib/log.ts";
 import {
   addLoanNote,
+  createAndApproveLoan,
   disburseLoan,
   fetchRawLoan,
   type FineractLoanSummary,
-  type FineractPendingLoan,
   getClient,
   getLoan,
-  listPendingDisbursal,
+  listClients,
+  type FineractClientRef,
+  listLoanProducts,
+  type FineractLoanProductRef,
   updateLoanExternalId,
 } from "./bridge/fineract.ts";
 import { toAppError } from "../lib/errors.ts";
 import { todayDarISO } from "./bridge/automation.ts";
 
-export interface PendingLoanRow extends FineractPendingLoan {
+/** Pending = a loan WE created in Fineract (via createLoan below) that hasn't
+ *  been linked + disbursed yet. Fineract-originated loans never surface here. */
+export interface PendingLoanRow {
+  loanId: string;
+  accountNo: string | null;
+  clientId: string | null;
+  clientName: string | null;
   clientEmail: string | null;
   clientMobile: string | null;
-  // If the loan already has an externalId stamped AND it matches a device in
-  // our DB, pre-fill the picker with that device so the admin can one-click
-  // disburse. null means nothing pre-matched.
+  productName: string | null;
+  principal: number;
+  externalId: string | null;
   prelinkedDeviceId: string | null;
 }
 
@@ -75,29 +84,48 @@ export interface LoanTrackingRow {
 }
 
 export async function listPending(enterpriseId: string): Promise<PendingLoanRow[]> {
-  const loans = await listPendingDisbursal();
+  // Drafts = loans we created on this platform that haven't been disbursed yet.
+  // Deleted from loan_drafts when linkAndDisburse promotes the row to loan_links.
+  const drafts = await run<Array<{
+    fineract_loan_id: string;
+    product_id: number;
+    product_name: string | null;
+    client_id: string | null;
+    client_name: string | null;
+    principal: number;
+  }>>(
+    db().from("loan_drafts")
+      .select("fineract_loan_id, product_id, product_name, client_id, client_name, principal")
+      .eq("enterprise_id", enterpriseId)
+      .order("created_at", { ascending: false }),
+  );
+
   // Enrich each with client contact. Keep this a per-loan await loop so one
-  // bad client fetch doesn't knock out the whole list; the list is small.
+  // bad client fetch doesn't knock out the whole list; drafts list is small.
   const out: PendingLoanRow[] = [];
-  for (const l of loans) {
+  for (const d of drafts) {
     let email: string | null = null;
     let mobile: string | null = null;
-    if (l.clientId) {
-      const c = await getClient(l.clientId);
-      if (c) { email = c.emailAddress; mobile = c.mobileNo; }
+    if (d.client_id) {
+      try {
+        const c = await getClient(d.client_id);
+        if (c) { email = c.emailAddress; mobile = c.mobileNo; }
+      } catch (e) {
+        log("warn", "loans.pending.client_fetch_failed", { client_id: d.client_id, error: String(e) });
+      }
     }
-    let prelinkedDeviceId: string | null = null;
-    if (l.externalId) {
-      // Match against serial or imei — mirrors findDeviceByExternalId in automation.ts.
-      const d = await run<Array<{ id: string }>>(
-        db().from("devices").select("id")
-          .eq("enterprise_id", enterpriseId).eq("is_removed", false)
-          .or(`serial_number.eq.${l.externalId},imei.eq.${l.externalId}`)
-          .limit(1),
-      );
-      if (d.length) prelinkedDeviceId = d[0].id;
-    }
-    out.push({ ...l, clientEmail: email, clientMobile: mobile, prelinkedDeviceId });
+    out.push({
+      loanId: d.fineract_loan_id,
+      accountNo: null,
+      clientId: d.client_id,
+      clientName: d.client_name,
+      clientEmail: email,
+      clientMobile: mobile,
+      productName: d.product_name,
+      principal: Number(d.principal),
+      externalId: null,
+      prelinkedDeviceId: null,
+    });
   }
   return out;
 }
@@ -242,7 +270,112 @@ export async function linkAndDisburse(
     throw e;
   }
 
+  // Step 4: promote complete — remove the draft row so the loan disappears from
+  // the Pending section. loan_links is now the authoritative row.
+  await db().from("loan_drafts")
+    .delete()
+    .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId);
+
   return { loanId, deviceId, externalId: externalId!, disbursedOn: today };
+}
+
+// -------------------------------------------------- Platform-initiated create
+
+export interface CreateLoanServiceInput {
+  clientId: string;
+  productId: number;
+  principal: number;
+  expectedDisbursementOn: string; // YYYY-MM-DD
+  numberOfRepayments?: number;
+  repaymentEvery?: number;
+  repaymentFrequencyType?: number;
+  interestRatePerPeriod?: number;
+}
+
+/** List Fineract loan products — the "Create loan" form's product picker. */
+export async function listProductsForCreate(): Promise<FineractLoanProductRef[]> {
+  return await listLoanProducts();
+}
+
+/** List Fineract clients — the "Create loan" form's borrower picker. */
+export async function listClientsForCreate(): Promise<FineractClientRef[]> {
+  return await listClients();
+}
+
+/**
+ * Create a loan in Fineract (POST + approve), then record a draft row so it
+ * appears in the Pending section of the Loans page. Device binding + disburse
+ * happen later via the existing Link & disburse flow.
+ */
+export async function createLoan(
+  enterpriseId: string,
+  adminId: string | null,
+  input: CreateLoanServiceInput,
+): Promise<{ loanId: string }> {
+  if (!(input.principal > 0)) fail("VALIDATION_FAILED", "principal must be > 0");
+
+  // Resolve product + client so the draft row carries human-readable context.
+  // These are strictly nice-to-have — we proceed on fetch failure with nulls.
+  let product: FineractLoanProductRef | null = null;
+  let clientName: string | null = null;
+  try {
+    const products = await listLoanProducts();
+    product = products.find((p) => p.id === input.productId) ?? null;
+  } catch (e) {
+    log("warn", "loans.create.product_lookup_failed", { product_id: input.productId, error: String(e) });
+  }
+  if (!product) fail("VALIDATION_FAILED", `Unknown loan product id=${input.productId}`);
+
+  // Bounds check against the product.
+  if (product.minPrincipal != null && input.principal < product.minPrincipal) {
+    fail("VALIDATION_FAILED", `Principal ${input.principal} is below the product minimum ${product.minPrincipal}.`);
+  }
+  if (product.maxPrincipal != null && input.principal > product.maxPrincipal) {
+    fail("VALIDATION_FAILED", `Principal ${input.principal} is above the product maximum ${product.maxPrincipal}.`);
+  }
+
+  try {
+    const c = await getClient(input.clientId);
+    if (c) clientName = c.displayName ?? null;
+  } catch (e) {
+    log("warn", "loans.create.client_lookup_failed", { client_id: input.clientId, error: String(e) });
+  }
+
+  const dateDMY = formatDarDate(parseISODate(input.expectedDisbursementOn));
+  const loanId = await createAndApproveLoan({
+    clientId: input.clientId,
+    productId: input.productId,
+    principal: input.principal,
+    numberOfRepayments: input.numberOfRepayments ?? product.numberOfRepayments ?? undefined,
+    repaymentEvery: input.repaymentEvery ?? product.repaymentEvery ?? undefined,
+    repaymentFrequencyType: input.repaymentFrequencyType ?? product.repaymentFrequencyType ?? undefined,
+    interestRatePerPeriod: input.interestRatePerPeriod ?? product.interestRatePerPeriod ?? undefined,
+    amortizationType: product.amortizationType ?? undefined,
+    interestType: product.interestType ?? undefined,
+    interestCalculationPeriodType: product.interestCalculationPeriodType ?? undefined,
+    transactionProcessingStrategyCode: product.transactionProcessingStrategyCode ?? undefined,
+    expectedDisbursementDateDMY: dateDMY,
+    submittedOnDateDMY: dateDMY,
+  });
+
+  await run(db().from("loan_drafts").insert({
+    enterprise_id: enterpriseId,
+    fineract_loan_id: loanId,
+    created_by: adminId,
+    product_id: input.productId,
+    product_name: product.name,
+    client_id: input.clientId,
+    client_name: clientName,
+    principal: input.principal,
+    expected_disbursement_on: input.expectedDisbursementOn,
+  }));
+
+  return { loanId };
+}
+
+function parseISODate(iso: string): Date {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
 }
 
 interface EmbeddedDevice {
@@ -357,37 +490,36 @@ export async function listAll(enterpriseId: string): Promise<LoanTrackingResult>
     }
   }));
 
-  // (b) Pending disbursal — direct from Fineract. These don't have a device yet.
-  // If this fails (open breaker, Fineract down, 401) we still render the
-  // already-linked loans but tell the UI so it can banner the state — a silent
-  // zero-pending list was indistinguishable from a healthy "no pending loans"
-  // and had admins thinking the link flow was broken (2026-11-11).
-  let pending: FineractPendingLoan[] = [];
-  const warnings: LoanTrackingWarnings = { pendingUnavailable: false };
-  try {
-    pending = await listPendingDisbursal();
-  } catch (e) {
-    const err = toAppError(e);
-    warnings.pendingUnavailable = true;
-    warnings.pendingError = err.code;
-    log("warn", "loans.list_all.pending_fetch_failed", { error: String(e), code: err.code });
-  }
+  // (b) Pending disbursal — from loan_drafts (loans we created via the Loans
+  // page that aren't disbursed yet). Fineract-originated loans never surface
+  // here; dropping Fineract's listPendingDisbursal also made the "pending
+  // banner" obsolete.
+  const drafts = await run<Array<{
+    fineract_loan_id: string;
+    product_name: string | null;
+    client_name: string | null;
+    principal: number;
+  }>>(
+    db().from("loan_drafts")
+      .select("fineract_loan_id, product_name, client_name, principal")
+      .eq("enterprise_id", enterpriseId),
+  );
   const linkedLoanIds = new Set(links.map((l) => l.fineract_loan_id));
-  const pendingRows: LoanTrackingRow[] = pending
-    .filter((p) => !linkedLoanIds.has(p.loanId))
-    .map((p) => ({
-      loanId: p.loanId,
-      accountNo: p.accountNo ?? null,
+  const pendingRows: LoanTrackingRow[] = drafts
+    .filter((d) => !linkedLoanIds.has(d.fineract_loan_id))
+    .map((d) => ({
+      loanId: d.fineract_loan_id,
+      accountNo: null,
       trackingStatus: "pending",
       dpd: 0,
-      clientName: p.clientName ?? null,
+      clientName: d.client_name,
       clientMobile: null,
       clientEmail: null,
       device: null,
-      productName: p.productName ?? null,
-      principalDisbursed: Number(p.principal ?? 0),
+      productName: d.product_name,
+      principalDisbursed: Number(d.principal),
       totalRepaid: 0,
-      totalOutstanding: Number(p.principal ?? 0),
+      totalOutstanding: Number(d.principal),
       percentRepaid: 0,
       disbursedOn: null,
       dueOn: null,
@@ -395,6 +527,7 @@ export async function listAll(enterpriseId: string): Promise<LoanTrackingResult>
       nextInstallmentAmount: 0,
     }));
 
+  const warnings: LoanTrackingWarnings = { pendingUnavailable: false };
   return { rows: [...pendingRows, ...disbursedRows], warnings };
 }
 

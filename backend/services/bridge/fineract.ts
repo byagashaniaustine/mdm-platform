@@ -372,6 +372,177 @@ export async function disburseLoan(loanId: string, amount: number, dateDMYY: str
   }, { countFailure: isNetworkFailure });
 }
 
+// ---------------------------------------------------------- Clients + products
+// Powering the "Create loan" form on the Loans page: the admin picks an
+// existing Fineract client and a loan product, we read the product's default
+// term shape, POST a new loan, then approve it.
+
+export interface FineractClientRef {
+  id: string;
+  displayName: string;
+  mobileNo: string | null;
+  officeName: string | null;
+  active: boolean;
+}
+
+/** All active clients, flattened for a dropdown. Fineract pages by default. */
+export async function listClients(limit = 500): Promise<FineractClientRef[]> {
+  const raw = await withBreaker(BREAKER, () =>
+    req<Record<string, unknown>>(`/clients?limit=${limit}&orderBy=displayName`),
+    { countFailure: isNetworkFailure },
+  );
+  const page = (raw.pageItems ?? []) as Array<Record<string, unknown>>;
+  return page.map((c) => ({
+    id: String(c.id),
+    displayName: String(c.displayName ?? c.firstname ?? ""),
+    mobileNo: c.mobileNo == null ? null : String(c.mobileNo),
+    officeName: c.officeName == null ? null : String(c.officeName),
+    active: c.active === true,
+  })).filter((c) => c.active);
+}
+
+export interface FineractLoanProductRef {
+  id: number;
+  name: string;
+  shortName: string | null;
+  currencyCode: string | null;
+  minPrincipal: number | null;
+  maxPrincipal: number | null;
+  defaultPrincipal: number | null;
+  numberOfRepayments: number | null;
+  repaymentEvery: number | null;
+  /** Fineract codes: 0=days, 1=weeks, 2=months, 3=years. */
+  repaymentFrequencyType: number | null;
+  repaymentFrequencyLabel: string | null;
+  interestRatePerPeriod: number | null;
+  interestType: number | null;
+  amortizationType: number | null;
+  interestCalculationPeriodType: number | null;
+  transactionProcessingStrategyCode: string | null;
+}
+
+export async function listLoanProducts(): Promise<FineractLoanProductRef[]> {
+  const raw = await withBreaker(BREAKER, () =>
+    req<Array<Record<string, unknown>>>(`/loanproducts`),
+    { countFailure: isNetworkFailure },
+  );
+  return raw.map((p) => {
+    const ccy = p.currency as Record<string, unknown> | undefined;
+    const freq = p.repaymentFrequencyType as Record<string, unknown> | undefined;
+    const interestType = p.interestType as Record<string, unknown> | undefined;
+    const amort = p.amortizationType as Record<string, unknown> | undefined;
+    const icp = p.interestCalculationPeriodType as Record<string, unknown> | undefined;
+    return {
+      id: Number(p.id),
+      name: String(p.name ?? ""),
+      shortName: p.shortName == null ? null : String(p.shortName),
+      currencyCode: ccy?.code == null ? null : String(ccy.code),
+      minPrincipal: numOrNull(p.minPrincipal),
+      maxPrincipal: numOrNull(p.maxPrincipal),
+      defaultPrincipal: numOrNull(p.principal),
+      numberOfRepayments: numOrNull(p.numberOfRepayments),
+      repaymentEvery: numOrNull(p.repaymentEvery),
+      repaymentFrequencyType: numOrNull(freq?.id),
+      repaymentFrequencyLabel: freq?.value == null ? null : String(freq.value),
+      interestRatePerPeriod: numOrNull(p.interestRatePerPeriod),
+      interestType: numOrNull(interestType?.id),
+      amortizationType: numOrNull(amort?.id),
+      interestCalculationPeriodType: numOrNull(icp?.id),
+      transactionProcessingStrategyCode: p.transactionProcessingStrategyCode == null ? null : String(p.transactionProcessingStrategyCode),
+    };
+  });
+}
+
+function numOrNull(v: unknown): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export interface CreateLoanInput {
+  clientId: string;
+  productId: number;
+  principal: number;
+  /** Optional override; defaults to the product's defaults. */
+  numberOfRepayments?: number;
+  repaymentEvery?: number;
+  repaymentFrequencyType?: number;
+  interestRatePerPeriod?: number;
+  loanTermFrequency?: number;
+  loanTermFrequencyType?: number;
+  amortizationType?: number;
+  interestType?: number;
+  interestCalculationPeriodType?: number;
+  transactionProcessingStrategyCode?: string;
+  /** Used for both submittedOnDate and expectedDisbursementDate. "dd MMMM yyyy". */
+  expectedDisbursementDateDMY: string;
+  submittedOnDateDMY: string;
+}
+
+/**
+ * Create a loan in Fineract and immediately move it through approve so it
+ * sits in "approved" state for the admin to link + disburse. Two POSTs:
+ *   1. POST /loans (submits the application)
+ *   2. POST /loans/{id}?command=approve
+ * Returns the Fineract loan id so the service layer can write a loan_drafts row.
+ */
+export async function createAndApproveLoan(input: CreateLoanInput): Promise<string> {
+  // Loan term defaults to numberOfRepayments * repaymentEvery when not provided.
+  const loanTermFrequency = input.loanTermFrequency
+    ?? (input.numberOfRepayments != null && input.repaymentEvery != null
+        ? input.numberOfRepayments * input.repaymentEvery
+        : input.numberOfRepayments ?? 0);
+  const loanTermFrequencyType = input.loanTermFrequencyType ?? input.repaymentFrequencyType ?? 2;
+
+  const body = {
+    clientId: Number(input.clientId),
+    productId: input.productId,
+    principal: input.principal,
+    loanTermFrequency,
+    loanTermFrequencyType,
+    numberOfRepayments: input.numberOfRepayments,
+    repaymentEvery: input.repaymentEvery,
+    repaymentFrequencyType: input.repaymentFrequencyType,
+    interestRatePerPeriod: input.interestRatePerPeriod,
+    amortizationType: input.amortizationType,
+    interestType: input.interestType,
+    interestCalculationPeriodType: input.interestCalculationPeriodType,
+    transactionProcessingStrategyCode: input.transactionProcessingStrategyCode,
+    expectedDisbursementDate: input.expectedDisbursementDateDMY,
+    submittedOnDate: input.submittedOnDateDMY,
+    loanType: "individual",
+    dateFormat: "dd MMMM yyyy",
+    locale: "en",
+  };
+
+  const created = await withBreaker(BREAKER, () =>
+    req<{ loanId: number; resourceId?: number }>(`/loans`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+    { countFailure: isNetworkFailure },
+  );
+  const loanId = String(created.loanId ?? created.resourceId);
+  if (!loanId || loanId === "undefined") {
+    fail("FINERACT_BAD_REQUEST", "Fineract returned no loan id from POST /loans");
+  }
+
+  await withBreaker(BREAKER, () =>
+    req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?command=approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        approvedOnDate: input.submittedOnDateDMY,
+        expectedDisbursementDate: input.expectedDisbursementDateDMY,
+        approvedLoanAmount: input.principal,
+        dateFormat: "dd MMMM yyyy",
+        locale: "en",
+      }),
+    }),
+    { countFailure: isNetworkFailure },
+  );
+  return loanId;
+}
+
 /** Lookup by externalId (the device serial/IMEI stamped on the loan). */
 export async function loanByExternalId(externalId: string, todayISO: string): Promise<FineractLoanSummary | null> {
   try {
