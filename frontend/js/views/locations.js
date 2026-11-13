@@ -1,19 +1,21 @@
 import { api, del, get, post } from "../api.js";
 import { ago, badge, clear, emptyState, field, fmtTime, h, icon, input, loading, modal, pageHeader, responsive, select, toast, toastError } from "../ui.js";
 
-// Self-hosted basemap: a single PMTiles file in Supabase Storage, range-read
-// by protomaps-leaflet. See scripts/create_maps_bucket.ts for the upload path.
-// OSM's community tile server (tile.openstreetmap.org) blocks production apps.
-const PMTILES_URL = "https://xoimjxsmmesvboebrtyu.supabase.co/storage/v1/object/public/maps/tanzania.pmtiles";
-const TILE_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · <a href="https://protomaps.com" target="_blank" rel="noopener">Protomaps</a>';
+// CartoDB Voyager — colorful OSM-derived raster basemap, zoom 0-22, no API key,
+// free for production use with attribution. Previously tried tile.openstreetmap.org
+// (community server, blocks production) and self-hosted PMTiles via Supabase
+// Storage (z11 cap left streets blocky when zoomed in).
+const TILE_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
+const TILE_SUBDOMAINS = "abcd";
+const TILE_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
 const STALE_MS = 6 * 3600_000;
 
 function leafletReady() {
-  if (window.L && window.protomapsL) return Promise.resolve({ L: window.L, pm: window.protomapsL });
+  if (window.L) return Promise.resolve(window.L);
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     const check = () => {
-      if (window.L && window.protomapsL) resolve({ L: window.L, pm: window.protomapsL });
+      if (window.L) resolve(window.L);
       else if (Date.now() - t0 > 10_000) reject(new Error("Map library failed to load"));
       else setTimeout(check, 50);
     };
@@ -28,7 +30,7 @@ function tileMap(points, fences, names) {
 
   queueMicrotask(async () => {
     try {
-      const { L, pm } = await leafletReady();
+      const L = await leafletReady();
       if (!container.isConnected) return;
       const css = getComputedStyle(document.documentElement);
       const ok = css.getPropertyValue("--ok").trim() || "#3F6B4F";
@@ -37,15 +39,10 @@ function tileMap(points, fences, names) {
       const charcoal = css.getPropertyValue("--charcoal").trim() || "#1D1D1B";
       const stone = css.getPropertyValue("--stone").trim() || "#BBB7B6";
 
-      // Default the view to Dar es Salaam before adding tiles — protomaps-leaflet
-      // needs the map to have bounds before the first draw, otherwise nothing
-      // fetches and you get a grey canvas. fitBounds below will re-center when
-      // we actually have markers.
-      const map = L.map(container, { scrollWheelZoom: false, zoomControl: true, maxZoom: 15 }).setView([-6.79, 39.28], 10);
-      pm.leafletLayer({
-        url: PMTILES_URL,
-        flavor: "light",
-        lang: "en",
+      const map = L.map(container, { scrollWheelZoom: false, zoomControl: true });
+      L.tileLayer(TILE_URL, {
+        maxZoom: 19,
+        subdomains: TILE_SUBDOMAINS,
         attribution: TILE_ATTRIB,
       }).addTo(map);
       L.control.scale({ metric: true, imperial: false }).addTo(map);
