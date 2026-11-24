@@ -52,6 +52,15 @@ export type Config = Readonly<{
   // configured).
   simCallbackUrl: string;
   simCallbackSecret: string;
+  // --- Malipopay (payments) ---
+  // Read-only integration today: per-loan reconciliation of Fineract repayments
+  // against Malipopay payment references lifted from each repayment's `note`.
+  // Webhook + outbound collection may follow once Harvey confirms direction.
+  // If malipoApiKey is empty the reconciliation check reports "pending" and
+  // every client call throws MALIPO_UNCONFIGURED — the app boots either way.
+  malipoBaseUrl: string;
+  malipoApiKey: string;
+  malipoWebhookSecret: string;
 }>;
 
 const DEFAULT_SCOPES = [
@@ -130,6 +139,9 @@ export function getConfig(): Config {
     automationTickMinutes: num("AUTOMATION_TICK_MINUTES", 30),
     simCallbackUrl: env("SIM_CALLBACK_URL", "").replace(/\/$/, ""),
     simCallbackSecret: env("SIM_CALLBACK_SECRET", ""),
+    malipoBaseUrl: env("MALIPOPAY_BASE_URL", "https://core-prod.malipopay.co.tz").replace(/\/$/, ""),
+    malipoApiKey: env("MALIPOPAY_API_KEY", "").trim(),
+    malipoWebhookSecret: env("MALIPOPAY_WEBHOOK_SECRET", "").trim(),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");

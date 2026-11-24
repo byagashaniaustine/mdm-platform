@@ -603,6 +603,56 @@ export async function createAndApproveLoan(input: CreateLoanInput): Promise<stri
   return loanId;
 }
 
+export interface FineractLoanTransaction {
+  id: string;
+  date: string | null;              // YYYY-MM-DD, from transaction.date (Fineract array form)
+  amount: number;                   // positive TZS; sign already normalized by Fineract
+  principal: number;
+  interest: number;
+  fees: number;
+  penalties: number;
+  typeCode: string | null;          // e.g. "loanTransactionType.repayment" / "disbursement" / "writeOff"
+  typeName: string | null;          // human form Fineract renders alongside typeCode
+  externalId: string | null;
+  isReversed: boolean;
+  isRepayment: boolean;             // derived: covers repayment + merchantIssuedRefund + repaymentAtDisbursement
+  isDisbursement: boolean;
+  note: string | null;              // operator-entered note. Malipopay reference lives in here.
+}
+
+/**
+ * All transactions on a loan, as exposed by /loans/{id}?associations=transactions.
+ * Used by the per-loan reconciliation check against Malipopay — we extract the
+ * Malipopay ML… reference out of each transaction's `note` and look it up.
+ * Fineract's transaction dates come as [y,m,d] arrays; we collapse to ISO here
+ * so callers don't repeat the parsing.
+ */
+export async function getLoanTransactions(loanId: string): Promise<FineractLoanTransaction[]> {
+  return await withBreaker(BREAKER, async () => {
+    const raw = await req<Record<string, unknown>>(`/loans/${encodeURIComponent(loanId)}?associations=transactions`);
+    const txns = (raw.transactions ?? []) as Array<Record<string, unknown>>;
+    return txns.map((t) => {
+      const type = (t.type ?? {}) as { code?: unknown; value?: unknown; disbursement?: boolean; repayment?: boolean; merchantIssuedRefund?: boolean; repaymentAtDisbursement?: boolean };
+      return {
+        id: String(t.id ?? ""),
+        date: arrToDate(t.date),
+        amount: Number(t.amount ?? 0),
+        principal: Number(t.principalPortion ?? 0),
+        interest: Number(t.interestPortion ?? 0),
+        fees: Number(t.feeChargesPortion ?? 0),
+        penalties: Number(t.penaltyChargesPortion ?? 0),
+        typeCode: type.code == null ? null : String(type.code),
+        typeName: type.value == null ? null : String(type.value),
+        externalId: (t.externalId as string | null) || null,
+        isReversed: t.manuallyReversed === true || t.reversed === true,
+        isRepayment: Boolean(type.repayment || type.merchantIssuedRefund || type.repaymentAtDisbursement),
+        isDisbursement: Boolean(type.disbursement),
+        note: (t.note as string | null) || null,
+      };
+    });
+  }, { countFailure: isNetworkFailure });
+}
+
 /** Lookup by externalId (the device serial/IMEI stamped on the loan). */
 export async function loanByExternalId(externalId: string, todayISO: string): Promise<FineractLoanSummary | null> {
   try {

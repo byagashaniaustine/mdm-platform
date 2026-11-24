@@ -16,14 +16,22 @@ import {
   disburseLoan,
   fetchRawLoan,
   type FineractLoanSummary,
+  type FineractLoanTransaction,
   getClient,
   getLoan,
+  getLoanTransactions,
   listClients,
   type FineractClientRef,
   listLoanProducts,
   type FineractLoanProductRef,
   updateLoanExternalId,
 } from "./bridge/fineract.ts";
+import {
+  extractReferencesFromNote,
+  getPaymentByReference,
+  type MalipoPayment,
+} from "./malipo.ts";
+import { getConfig } from "../config.ts";
 import { toAppError } from "../lib/errors.ts";
 import { todayDarISO } from "./bridge/automation.ts";
 
@@ -738,7 +746,7 @@ export async function getTrackingDetail(enterpriseId: string, loanId: string): P
     }));
   }
 
-  const reconciliation = buildReconciliation(loan, tierState, lockEvents);
+  const reconciliation = await buildReconciliation(loan, tierState, lockEvents);
 
   return {
     loanId: loan.loanId,
@@ -781,11 +789,11 @@ export async function getTrackingDetail(enterpriseId: string, loanId: string): P
  * The daily worker (task #16) will run this same shape across all loans and
  * persist findings; the detail view calls it inline so the UI is always live.
  */
-function buildReconciliation(
+async function buildReconciliation(
   loan: FineractLoanSummary,
   tierState: LoanTrackingDetail["tierState"],
   lockEvents: LoanTrackingDetail["lockEvents"],
-): LoanTrackingDetail["reconciliation"] {
+): Promise<LoanTrackingDetail["reconciliation"]> {
   const out: LoanTrackingDetail["reconciliation"] = [];
 
   // (1) Mapene loan status vs device tier intent.
@@ -846,15 +854,134 @@ function buildReconciliation(
     }
   }
 
-  // (4) MalipoPay reconciliation — stubbed until the integration ships.
-  // Task #17 fills this in by looking up last payment ref + amount for the loan.
-  out.push({
-    check: "MalipoPay payments",
-    state: "pending",
-    detail: "MalipoPay integration not wired yet. Will compare last payment vs Mapene totalRepaid once live.",
-  });
+  // (4) Malipopay reconciliation. Pulls every repayment on the loan from
+  // Fineract, lifts Malipopay refs (ML…) out of each repayment's `note`, looks
+  // each one up, and compares amount + status. Three failure modes we flag:
+  //   - Repayment with no ref in the note → Malipopay can't be verified at all
+  //   - Ref not found in Malipopay → Fineract claims a payment Malipopay doesn't know
+  //   - Ref found but status != SUCCESSFUL/PAID/PARTIAL or amount differs → drift
+  // Scope today is read-only — "pending" is still used when Malipopay isn't
+  // configured server-side so the row renders cleanly in dev.
+  if (!getConfig().malipoApiKey) {
+    out.push({
+      check: "Malipopay payments",
+      state: "pending",
+      detail: "Malipopay integration not configured on this server (MALIPOPAY_API_KEY unset).",
+    });
+  } else {
+    out.push(await malipoReconciliation(loan));
+  }
 
   return out;
+}
+
+/**
+ * Per-loan check against Malipopay. Separate function so the upstream call can
+ * fail soft — a Malipopay outage returns a `warn` row, not an exception that
+ * takes down the whole Loan Tracking detail view.
+ */
+async function malipoReconciliation(loan: FineractLoanSummary): Promise<LoanTrackingDetail["reconciliation"][number]> {
+  const label = "Malipopay payments";
+
+  let txns: FineractLoanTransaction[];
+  try {
+    txns = await getLoanTransactions(loan.loanId);
+  } catch (e) {
+    return { check: label, state: "warn", detail: `Could not read Fineract transactions: ${toAppError(e).code}.` };
+  }
+
+  // Only non-reversed repayments are reconcilable; disbursements and write-offs
+  // don't go through Malipopay. The initial payment the user cares about is
+  // just the earliest-dated repayment, which falls out of this filter already.
+  const repayments = txns
+    .filter((t) => t.isRepayment && !t.isReversed)
+    .sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+
+  if (repayments.length === 0) {
+    // Either nothing paid yet (fine for a freshly-disbursed loan) or Fineract
+    // has the disbursement booked but no inbound payment at all.
+    return {
+      check: label,
+      state: loan.status === "approved" || loan.status === "pending" ? "ok" : "ok",
+      detail: loan.disbursedOn
+        ? `Loan disbursed ${loan.disbursedOn}, no repayments recorded yet.`
+        : "No repayments recorded yet.",
+    };
+  }
+
+  const unresolved: Array<{ txId: string; date: string | null; reason: string }> = [];
+  const mismatched: Array<{ txId: string; date: string | null; ref: string; reason: string }> = [];
+  const reconciled: Array<{ txId: string; ref: string; amount: number }> = [];
+  let lookupError: string | null = null;
+
+  for (const tx of repayments) {
+    // Prefer externalId (clean key); fall back to parsing the note.
+    const refsFromNote = extractReferencesFromNote(tx.note);
+    const refs: string[] = [];
+    if (tx.externalId && /^ML\d{5,}$/i.test(tx.externalId)) refs.push(tx.externalId.toUpperCase());
+    for (const r of refsFromNote) if (!refs.includes(r)) refs.push(r);
+
+    if (refs.length === 0) {
+      unresolved.push({ txId: tx.id, date: tx.date, reason: "no Malipopay reference on this repayment" });
+      continue;
+    }
+
+    for (const ref of refs) {
+      let payment: MalipoPayment | null;
+      try {
+        payment = await getPaymentByReference(ref);
+      } catch (e) {
+        lookupError = toAppError(e).code;
+        break;
+      }
+      if (!payment) {
+        mismatched.push({ txId: tx.id, date: tx.date, ref, reason: "ref not found in Malipopay" });
+        continue;
+      }
+      const paid = payment.status === "SUCCESSFUL" || payment.status === "PAID" || payment.status === "PARTIAL";
+      if (!paid) {
+        mismatched.push({ txId: tx.id, date: tx.date, ref, reason: `Malipopay status ${payment.status}` });
+        continue;
+      }
+      // Amount comparison. Fineract's repayment total includes principal + interest
+      // + fees + penalties. Malipopay's `amount` is what the customer sent gross.
+      // A small rounding gap is tolerated (TZS 1).
+      if (Math.abs(payment.amount - tx.amount) > 1) {
+        mismatched.push({
+          txId: tx.id,
+          date: tx.date,
+          ref,
+          reason: `amount differs — Fineract ${tx.amount.toLocaleString()} vs Malipopay ${payment.amount.toLocaleString()}`,
+        });
+        continue;
+      }
+      reconciled.push({ txId: tx.id, ref, amount: payment.amount });
+    }
+    if (lookupError) break;
+  }
+
+  if (lookupError) {
+    return { check: label, state: "warn", detail: `Malipopay lookup failed: ${lookupError}. Reconciled ${reconciled.length} of ${repayments.length} before giving up.` };
+  }
+
+  const total = repayments.length;
+  if (mismatched.length === 0 && unresolved.length === 0) {
+    return { check: label, state: "ok", detail: `All ${total} repayment${total === 1 ? "" : "s"} reconciled against Malipopay.` };
+  }
+  if (mismatched.length === 0) {
+    // Only unresolved rows — Fineract has repayments without an ML ref. Soft warn.
+    return {
+      check: label,
+      state: "warn",
+      detail: `${reconciled.length} of ${total} reconciled. ${unresolved.length} repayment${unresolved.length === 1 ? "" : "s"} missing a Malipopay reference in the Fineract note.`,
+    };
+  }
+  const firstBad = mismatched[0];
+  return {
+    check: label,
+    state: "mismatch",
+    detail: `${reconciled.length} of ${total} reconciled. ${mismatched.length} mismatch${mismatched.length === 1 ? "" : "es"} — first: ${firstBad.ref} on ${firstBad.date ?? "unknown date"} (${firstBad.reason}).`,
+  };
 }
 
 /** Flatten Fineract's repaymentSchedule.periods into a UI-friendly shape. */
