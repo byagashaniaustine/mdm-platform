@@ -603,6 +603,59 @@ export async function createAndApproveLoan(input: CreateLoanInput): Promise<stri
   return loanId;
 }
 
+export interface PostRepaymentInput {
+  loanId: string;
+  amount: number;
+  dateDMYY: string;          // "25 November 2026" per Fineract's dateFormat
+  externalId: string;        // Malipopay ML… reference — our idempotency key
+  paymentTypeId: number;     // registered at bootstrap; 4 on istore (Malipopay)
+  note?: string | null;
+}
+
+export interface PostRepaymentResult {
+  transactionId: string;
+  resourceId: number | null;
+}
+
+/**
+ * Book a repayment on a loan. Called by the Malipopay webhook route after a
+ * payment.confirmed arrives — translates Malipopay's payload into Fineract's
+ * expected shape and POSTs to /loans/{id}/transactions?command=repayment.
+ *
+ * Idempotency is delegated to Fineract: the second POST with the same
+ * externalId returns FINERACT_BAD_REQUEST with a "duplicate" message, which
+ * callers can catch and treat as "already booked". No local dedupe table.
+ */
+export async function postRepayment(input: PostRepaymentInput): Promise<PostRepaymentResult> {
+  return await withBreaker(BREAKER, async () => {
+    const raw = await req<Record<string, unknown>>(
+      `/loans/${encodeURIComponent(input.loanId)}/transactions?command=repayment`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          transactionDate: input.dateDMYY,
+          transactionAmount: input.amount,
+          paymentTypeId: input.paymentTypeId,
+          externalId: input.externalId,
+          dateFormat: "dd MMMM yyyy",
+          locale: "en",
+          ...(input.note ? { note: input.note } : {}),
+        }),
+      },
+    );
+    return {
+      transactionId: String(raw.resourceId ?? raw.transactionId ?? ""),
+      resourceId: raw.resourceId == null ? null : Number(raw.resourceId),
+    };
+  }, { countFailure: isNetworkFailure });
+}
+
+/** Fineract renders transaction dates as "dd MMMM yyyy" (e.g. "25 November 2026"). */
+export function formatFineractDate(d: Date): string {
+  const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 export interface FineractLoanTransaction {
   id: string;
   date: string | null;              // YYYY-MM-DD, from transaction.date (Fineract array form)

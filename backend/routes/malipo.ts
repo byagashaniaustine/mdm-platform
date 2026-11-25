@@ -16,7 +16,9 @@
 import { Hono } from "hono";
 import { getConfig } from "../config.ts";
 import { db, run, runMaybe } from "../lib/db.ts";
+import { toAppError } from "../lib/errors.ts";
 import { log } from "../lib/log.ts";
+import { formatFineractDate, postRepayment } from "../services/bridge/fineract.ts";
 import { verifyWebhookSignature } from "../services/malipo.ts";
 
 interface MalipoWebhookEvent {
@@ -157,8 +159,9 @@ export async function handleMalipoWebhook(c: any) {
   }
 
   // Terminal confirmations stamp the last-seen snapshot on loan_links for the
-  // Loan Tracking UI. No Fineract write-back here — that stays with Harvey's
-  // decision; we only reflect what Malipopay says is true.
+  // Loan Tracking UI, THEN book the repayment in Fineract so the loan ledger
+  // catches up. The Fineract POST is idempotent via externalId = Malipopay
+  // reference — a retried webhook can't double-book.
   const isConfirmed = evt.event === "payment.confirmed" && (evt.status === "SUCCESSFUL" || evt.status === "PAID" || evt.status === "PARTIAL");
   if (isConfirmed && loanId) {
     await run(db().from("loan_links").update({
@@ -166,6 +169,51 @@ export async function handleMalipoWebhook(c: any) {
       last_malipo_amount: evt.amount,
       last_malipo_status: evt.status,
     }).eq("fineract_loan_id", loanId));
+
+    // Fineract write-back. Soft-fail: if Fineract rejects, we still 200 to
+    // Malipopay (per packet: retries not guaranteed). Operator sees the
+    // failure in events + loan_links.last_malipo_* without Malipopay
+    // ever re-firing. The reconciliation check at loans.ts:849 surfaces
+    // the drift in the Loan Tracking panel.
+    if (cfg.malipoFineractPaymentTypeId > 0 && evt.reference) {
+      try {
+        const posted = await postRepayment({
+          loanId,
+          amount: evt.amount,
+          dateDMYY: formatFineractDate(new Date()),
+          externalId: evt.reference,     // ML… → Fineract rejects duplicate externalIds
+          paymentTypeId: cfg.malipoFineractPaymentTypeId,
+          note: `Via Malipopay ${evt.reference}${evt.customerReference ? ` (${evt.customerReference})` : ""}`,
+        });
+        log("info", "malipo.repayment_booked", {
+          loan_id: loanId,
+          malipo_ref: evt.reference,
+          fineract_tx_id: posted.transactionId,
+          amount: evt.amount,
+        });
+      } catch (e) {
+        const err = toAppError(e);
+        // Duplicate externalId → repayment already booked (Malipopay retried,
+        // our previous POST succeeded). Treat as success.
+        const looksDuplicate = err.code === "FINERACT_BAD_REQUEST" && /(duplicate|already)/i.test(err.message);
+        if (looksDuplicate) {
+          log("info", "malipo.repayment_duplicate", { loan_id: loanId, malipo_ref: evt.reference });
+        } else {
+          log("warn", "malipo.repayment_post_failed", {
+            loan_id: loanId,
+            malipo_ref: evt.reference,
+            error: err.code,
+            message: err.message?.slice(0, 200),
+          });
+          // Flip the event row we already inserted from succeeded → failed so
+          // ops can see which webhooks didn't make it into Fineract.
+          await run(db().from("events").update({
+            state: "failed",
+            error_message: `Fineract post failed: ${err.code} ${err.message?.slice(0, 200) ?? ""}`,
+          }).eq("idempotency_key", dedupeKey));
+        }
+      }
+    }
   }
 
   log("info", "malipo.webhook_processed", {

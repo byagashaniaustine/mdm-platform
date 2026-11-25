@@ -61,6 +61,11 @@ export type Config = Readonly<{
   malipoBaseUrl: string;
   malipoApiKey: string;
   malipoWebhookSecret: string;
+  // Fineract paymentTypes.id to stamp on repayments booked from Malipopay
+  // webhooks. Registered 2026-11-25 on istore: id=4, name="Malipopay".
+  // Set to 0 to disable Fineract write-back (webhook still logs + stamps
+  // loan_links.last_malipo_*, just doesn't POST to Fineract).
+  malipoFineractPaymentTypeId: number;
 }>;
 
 const DEFAULT_SCOPES = [
@@ -142,6 +147,7 @@ export function getConfig(): Config {
     malipoBaseUrl: env("MALIPOPAY_BASE_URL", "https://core-prod.malipopay.co.tz").replace(/\/$/, ""),
     malipoApiKey: env("MALIPOPAY_API_KEY", "").trim(),
     malipoWebhookSecret: env("MALIPOPAY_WEBHOOK_SECRET", "").trim(),
+    malipoFineractPaymentTypeId: num("MALIPO_FINERACT_PAYMENT_TYPE_ID", 4),
   });
   if (cached.env === "production" && cached.mailProvider === "console") {
     throw new Error("MAIL_PROVIDER=console is not allowed in production (OTP codes would be logged)");
