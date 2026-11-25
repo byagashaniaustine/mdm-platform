@@ -125,11 +125,16 @@ function statusFrom(raw: unknown): FineractLoanSummary["status"] {
 }
 
 /**
- * Hour-precision DPD for products whose repayment cadence is daily (or
- * sub-weekly). Past-due starts at 00:00 Africa/Dar_es_Salaam (UTC+3) on the
- * day AFTER the earliest unpaid dueDate. At 24h past, this equals dpd=1 day;
- * at 1h past, this equals 1. Takes `nowDate` so callers can inject a fixed
- * clock in tests; the tier engine itself stays pure.
+ * Hour-precision DPD for products whose repayment cadence is daily. Deadline
+ * is the START of the due date in Africa/Dar_es_Salaam (UTC+3), i.e. the
+ * midnight ENTERING the due date — which is the end of the previous day.
+ * For the first installment this lands at end-of-disbursement-day, so the
+ * tier countdown effectively starts on disbursement day (operator spec).
+ *
+ * Note: this convention differs from `dpdFromSchedule` (day-grain) which
+ * counts days from the end of the due date. That's intentional — hour-grain
+ * products are short-cycle (daily installments); day-grain are long-cycle
+ * (monthly). Only hour-grain products consult this field via tierFor.
  */
 function dpdHoursFromSchedule(schedule: unknown, nowDate: Date): number {
   const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
@@ -138,10 +143,8 @@ function dpdHoursFromSchedule(schedule: unknown, nowDate: Date): number {
     if (!due) continue;
     if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
     if (p.complete || p.obligationsMetOnDate) continue;
-    // Deadline = 00:00 UTC+3 on the day AFTER the due date. Date.UTC with
-    // hour=-3 gives us that instant in epoch ms without a tz library.
     const [y, m, d] = due.split("-").map(Number);
-    const deadlineMs = Date.UTC(y, m - 1, d + 1, -3, 0, 0);
+    const deadlineMs = Date.UTC(y, m - 1, d, -3, 0, 0);
     const diffHours = Math.floor((nowDate.getTime() - deadlineMs) / 3_600_000);
     return Math.max(0, diffHours);
   }
