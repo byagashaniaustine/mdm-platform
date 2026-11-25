@@ -39,6 +39,10 @@ export interface FineractLoanSummary {
   // (00:00 Africa/Dar_es_Salaam on the day AFTER dueOn). Set on every live
   // getLoan; webhook overrides that don't carry the schedule leave it at 0.
   dpdHours: number;
+  // Signed hours until the deadline. Positive = future (not yet due),
+  // negative = past due. Lets the hour-grain tier pick a "2h before due"
+  // pre-due window without re-computing from dpdHours + today.
+  hoursToDue: number;
 }
 
 interface FineractAuth {
@@ -140,6 +144,25 @@ function dpdHoursFromSchedule(schedule: unknown, nowDate: Date): number {
     const deadlineMs = Date.UTC(y, m - 1, d + 1, -3, 0, 0);
     const diffHours = Math.floor((nowDate.getTime() - deadlineMs) / 3_600_000);
     return Math.max(0, diffHours);
+  }
+  return 0;
+}
+
+/**
+ * Signed hours between now and the deadline (00:00 UTC+3 the day AFTER the
+ * earliest unpaid due date). Positive = future, negative = past due. Used by
+ * the hour-grain tier to decide "within N hours of deadline → pre-due reminder".
+ */
+function hoursToDueFromSchedule(schedule: unknown, nowDate: Date): number {
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
+  for (const p of periods) {
+    const due = arrToDate(p.dueDate);
+    if (!due) continue;
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
+    if (p.complete || p.obligationsMetOnDate) continue;
+    const [y, m, d] = due.split("-").map(Number);
+    const deadlineMs = Date.UTC(y, m - 1, d + 1, -3, 0, 0);
+    return Math.floor((deadlineMs - nowDate.getTime()) / 3_600_000);
   }
   return 0;
 }
@@ -293,6 +316,7 @@ export async function getLoan(loanId: string, todayISO: string): Promise<Finerac
       nextInstallmentAmount: nextInstallmentFromSchedule(raw.repaymentSchedule),
       firstInstallmentPaid: firstInstallmentPaidFromSchedule(raw.repaymentSchedule),
       dpdHours: dpdHoursFromSchedule(raw.repaymentSchedule, new Date()),
+      hoursToDue: hoursToDueFromSchedule(raw.repaymentSchedule, new Date()),
     };
   }, { countFailure: isNetworkFailure });
 }

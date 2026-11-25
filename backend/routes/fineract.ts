@@ -88,6 +88,11 @@ function coerceLoanOverride(raw: unknown, loanId: string): FineractLoanSummary |
     // Fineract fetch in reconcileBatch replaces this before tierFor runs.
     firstInstallmentPaid: Boolean(r.firstInstallmentPaid ?? false),
     dpdHours: Math.max(0, Number(r.dpdHours ?? 0) || 0),
+    // Default to a very-future value when the override doesn't carry it — the
+    // live getLoan() in reconcile will replace this before tierFor runs; this
+    // default just ensures we don't accidentally fire the pre-due window on
+    // a webhook-coerced loan.
+    hoursToDue: Number(r.hoursToDue ?? 9999) || 9999,
   };
 }
 

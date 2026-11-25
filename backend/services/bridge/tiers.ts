@@ -37,6 +37,9 @@ export interface LoanState {
   // thresholds (daily-repayment loans — a 24h cycle makes day-grain too
   // coarse). Omit for monthly products; dpd (days) is still authoritative.
   dpdHours?: number;
+  // Signed hours between now and deadline. Positive = future. Used by the
+  // hour-grain pre-due window (e.g. "within 2h of due → due_2d reminder").
+  hoursToDue?: number;
 }
 
 // Per-product thresholds. Spec §4.2 defaults; override in future by moving
@@ -47,16 +50,21 @@ export interface LoanState {
 // Operator decision (2026-10-29): lock at 72h past due uniformly across the
 // monthly catalog. Daily test product (id 9) added 2026-11-25: 6h soft, 24h
 // lock — one full cycle of grace before the device goes payment-first.
-const THRESHOLDS: Record<number, { kSoft: number; L: number; kSoftHours?: number; LHours?: number }> = {
-  1: { kSoft: 2, L: 3 },                                  // iPhone 17e — monthly
-  2: { kSoft: 2, L: 3 },                                  // iPhone 17 256 — monthly
-  3: { kSoft: 2, L: 3 },                                  // iPhone 17 512 — monthly
-  4: { kSoft: 2, L: 3 },                                  // iPhone Air 256 — monthly
-  5: { kSoft: 2, L: 3 },                                  // iPhone Air 512 — monthly
-  6: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro — monthly
-  7: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro Max 256 — monthly
-  8: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro Max 512 — monthly
-  9: { kSoft: 1, L: 1, kSoftHours: 6, LHours: 24 },       // iPhone 12 Daily TEST — hour-grain
+// A product opting into hour-grain supplies ALL three: preDueHours (how long
+// before the deadline the pre-due reminder starts), kSoftHours (when the
+// overdue reminder tier kicks in — "2h past due"), LHours (when the device
+// locks — "3h past due"). Day fields stay as fallback but are ignored when
+// the hour triple is present.
+const THRESHOLDS: Record<number, { kSoft: number; L: number; preDueHours?: number; kSoftHours?: number; LHours?: number }> = {
+  1: { kSoft: 2, L: 3 },                                              // iPhone 17e — monthly
+  2: { kSoft: 2, L: 3 },                                              // iPhone 17 256 — monthly
+  3: { kSoft: 2, L: 3 },                                              // iPhone 17 512 — monthly
+  4: { kSoft: 2, L: 3 },                                              // iPhone Air 256 — monthly
+  5: { kSoft: 2, L: 3 },                                              // iPhone Air 512 — monthly
+  6: { kSoft: 2, L: 3 },                                              // iPhone 17 Pro — monthly
+  7: { kSoft: 2, L: 3 },                                              // iPhone 17 Pro Max 256 — monthly
+  8: { kSoft: 2, L: 3 },                                              // iPhone 17 Pro Max 512 — monthly
+  9: { kSoft: 1, L: 1, preDueHours: 2, kSoftHours: 2, LHours: 3 },    // iPhone 12 Daily TEST — hour-grain
 };
 const DEFAULT_THRESHOLD = { kSoft: 2, L: 3 };
 
@@ -80,25 +88,36 @@ export function tierFor(loan: LoanState, todayISO: string): Tier {
 
   const t = THRESHOLDS[loan.productId] ?? DEFAULT_THRESHOLD;
 
-  // Hour-grain path for daily-repayment products. Enabled when BOTH the loan
-  // carries dpdHours (live Fineract read populated it) AND the product config
-  // supplies kSoftHours + LHours. For everyone else we fall through to the
-  // day-based logic unchanged.
-  if (loan.dpdHours !== undefined && t.LHours !== undefined && t.kSoftHours !== undefined) {
-    if (loan.dpdHours >= t.LHours) return "locked";
-    if (loan.dpdHours >= t.kSoftHours) return "overdue_2d";
-    if (loan.dpdHours >= 1) return "overdue_2d";       // any hour past due = soft tier
-  } else {
-    if (loan.dpd >= t.L) return "locked";
-    if (loan.dpd >= t.kSoft) return "overdue_2d";
-    if (loan.dpd >= 1) return "overdue_2d";            // spec §8 soft tier
+  // Hour-grain path owns the full decision for daily-repayment products.
+  // Enabled when the product supplies the pre-due/kSoft/L hour triple AND
+  // the loan carries live dpdHours + hoursToDue. Monthly products fall
+  // through to the day-based block below, unchanged.
+  const useHours =
+    loan.dpdHours !== undefined &&
+    loan.hoursToDue !== undefined &&
+    t.LHours !== undefined &&
+    t.kSoftHours !== undefined &&
+    t.preDueHours !== undefined;
+
+  if (useHours) {
+    if (!loan.firstInstallmentPaid) return "due_2d";
+    if (loan.dpdHours! >= t.LHours!) return "locked";
+    if (loan.dpdHours! >= t.kSoftHours!) return "overdue_2d";
+    // Pre-due reminder window: fires within `preDueHours` of the deadline AND
+    // continues for the overdue grace up to kSoftHours past. hoursToDue
+    // is positive when future, negative when past; a single ≤ compares both.
+    if (loan.hoursToDue! <= t.preDueHours!) return "due_2d";
+    return "disbursed";
   }
+
+  // Day-grain path (monthly catalog) — unchanged from the pre-hour-grain world.
+  if (loan.dpd >= t.L) return "locked";
+  if (loan.dpd >= t.kSoft) return "overdue_2d";
+  if (loan.dpd >= 1) return "overdue_2d";
 
   // Initial-payment gate (product policy, tightened 2026-11-25): the device
   // sits in Due-2D on disbursement day and stays there until the FULL first
-  // installment settles — a partial payment no longer clears it (previously
-  // any `totalRepaid > 0` released; that let a TZS 1 trickle move the device
-  // to "released" state with the first installment still open).
+  // installment settles — a partial payment no longer clears it.
   if (!loan.firstInstallmentPaid) return "due_2d";
 
   // Not yet overdue. Window is T-2, T-1, and T (the due day itself).
