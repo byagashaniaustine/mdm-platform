@@ -33,19 +33,30 @@ export interface LoanState {
   // it to released. Optional so pre-schedule callers don't have to supply
   // it; omit → behaves as "unpaid" (safer default).
   firstInstallmentPaid?: boolean;
+  // Hour-precision DPD. Only consulted for products that opt into hourly
+  // thresholds (daily-repayment loans — a 24h cycle makes day-grain too
+  // coarse). Omit for monthly products; dpd (days) is still authoritative.
+  dpdHours?: number;
 }
 
-// Per-product thresholds. Spec §4.2 defaults; override in future by moving this
-// to automation_settings. k_soft = DPD at which the soft tier kicks in; L = DPD
-// at which the hard lock lands.
-// Operator decision (2026-10-29): lock at 72h past due uniformly across every
-// loan product. Diverges from spec §4.2 defaults of 5/8/15 — tighter and
-// product-agnostic. If this ever needs product-specific tuning, move the
-// thresholds to automation_settings.
-const THRESHOLDS: Record<number, { kSoft: number; L: number }> = {
-  1: { kSoft: 2, L: 3 },   // 7-Day
-  2: { kSoft: 2, L: 3 },   // 14-Day
-  3: { kSoft: 2, L: 3 },   // 28-Day
+// Per-product thresholds. Spec §4.2 defaults; override in future by moving
+// this to automation_settings. k_soft = DPD at which the soft tier kicks in;
+// L = DPD at which the hard lock lands. Add kSoftHours + LHours to a row to
+// opt that product into hour-grain tier transitions (for daily-repayment
+// products where a 24-hour lock delay is too lax).
+// Operator decision (2026-10-29): lock at 72h past due uniformly across the
+// monthly catalog. Daily test product (id 9) added 2026-11-25: 6h soft, 24h
+// lock — one full cycle of grace before the device goes payment-first.
+const THRESHOLDS: Record<number, { kSoft: number; L: number; kSoftHours?: number; LHours?: number }> = {
+  1: { kSoft: 2, L: 3 },                                  // iPhone 17e — monthly
+  2: { kSoft: 2, L: 3 },                                  // iPhone 17 256 — monthly
+  3: { kSoft: 2, L: 3 },                                  // iPhone 17 512 — monthly
+  4: { kSoft: 2, L: 3 },                                  // iPhone Air 256 — monthly
+  5: { kSoft: 2, L: 3 },                                  // iPhone Air 512 — monthly
+  6: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro — monthly
+  7: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro Max 256 — monthly
+  8: { kSoft: 2, L: 3 },                                  // iPhone 17 Pro Max 512 — monthly
+  9: { kSoft: 1, L: 1, kSoftHours: 6, LHours: 24 },       // iPhone 12 Daily TEST — hour-grain
 };
 const DEFAULT_THRESHOLD = { kSoft: 2, L: 3 };
 
@@ -68,10 +79,20 @@ export function tierFor(loan: LoanState, todayISO: string): Tier {
   if (!loan.dueOn) return "disbursed";
 
   const t = THRESHOLDS[loan.productId] ?? DEFAULT_THRESHOLD;
-  if (loan.dpd >= t.L) return "locked";
-  if (loan.dpd >= t.kSoft) return "overdue_2d";
-  // Any arrears below k_soft (dpd 1) still signal soft tier — spec §8.
-  if (loan.dpd >= 1) return "overdue_2d";
+
+  // Hour-grain path for daily-repayment products. Enabled when BOTH the loan
+  // carries dpdHours (live Fineract read populated it) AND the product config
+  // supplies kSoftHours + LHours. For everyone else we fall through to the
+  // day-based logic unchanged.
+  if (loan.dpdHours !== undefined && t.LHours !== undefined && t.kSoftHours !== undefined) {
+    if (loan.dpdHours >= t.LHours) return "locked";
+    if (loan.dpdHours >= t.kSoftHours) return "overdue_2d";
+    if (loan.dpdHours >= 1) return "overdue_2d";       // any hour past due = soft tier
+  } else {
+    if (loan.dpd >= t.L) return "locked";
+    if (loan.dpd >= t.kSoft) return "overdue_2d";
+    if (loan.dpd >= 1) return "overdue_2d";            // spec §8 soft tier
+  }
 
   // Initial-payment gate (product policy, tightened 2026-11-25): the device
   // sits in Due-2D on disbursement day and stays there until the FULL first

@@ -87,6 +87,7 @@ function coerceLoanOverride(raw: unknown, loanId: string): FineractLoanSummary |
     // Overrides don't carry the schedule, so default to false — the live
     // Fineract fetch in reconcileBatch replaces this before tierFor runs.
     firstInstallmentPaid: Boolean(r.firstInstallmentPaid ?? false),
+    dpdHours: Math.max(0, Number(r.dpdHours ?? 0) || 0),
   };
 }
 

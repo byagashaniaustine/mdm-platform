@@ -34,6 +34,11 @@ export interface FineractLoanSummary {
   // disbursement day until the FULL first installment lands (partial payments
   // don't clear it). Always false for pending/approved (no schedule yet).
   firstInstallmentPaid: boolean;
+  // Sub-day precision for products whose cadence is daily — e.g. the "weekly
+  // loan with daily repayment" shape. Measures hours since the deadline
+  // (00:00 Africa/Dar_es_Salaam on the day AFTER dueOn). Set on every live
+  // getLoan; webhook overrides that don't carry the schedule leave it at 0.
+  dpdHours: number;
 }
 
 interface FineractAuth {
@@ -113,6 +118,30 @@ function statusFrom(raw: unknown): FineractLoanSummary["status"] {
   if (r.pendingApproval) return "pending";
   if (r.waitingForDisbursal) return "approved";
   return "unknown";
+}
+
+/**
+ * Hour-precision DPD for products whose repayment cadence is daily (or
+ * sub-weekly). Past-due starts at 00:00 Africa/Dar_es_Salaam (UTC+3) on the
+ * day AFTER the earliest unpaid dueDate. At 24h past, this equals dpd=1 day;
+ * at 1h past, this equals 1. Takes `nowDate` so callers can inject a fixed
+ * clock in tests; the tier engine itself stays pure.
+ */
+function dpdHoursFromSchedule(schedule: unknown, nowDate: Date): number {
+  const periods = (schedule as { periods?: Array<{ dueDate?: unknown; complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
+  for (const p of periods) {
+    const due = arrToDate(p.dueDate);
+    if (!due) continue;
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
+    if (p.complete || p.obligationsMetOnDate) continue;
+    // Deadline = 00:00 UTC+3 on the day AFTER the due date. Date.UTC with
+    // hour=-3 gives us that instant in epoch ms without a tz library.
+    const [y, m, d] = due.split("-").map(Number);
+    const deadlineMs = Date.UTC(y, m - 1, d + 1, -3, 0, 0);
+    const diffHours = Math.floor((nowDate.getTime() - deadlineMs) / 3_600_000);
+    return Math.max(0, diffHours);
+  }
+  return 0;
 }
 
 /** Compute DPD = today − earliest unpaid dueDate. 0 when nothing is overdue. */
@@ -263,6 +292,7 @@ export async function getLoan(loanId: string, todayISO: string): Promise<Finerac
       totalRepaid: Number(summary.totalRepayment ?? 0),
       nextInstallmentAmount: nextInstallmentFromSchedule(raw.repaymentSchedule),
       firstInstallmentPaid: firstInstallmentPaidFromSchedule(raw.repaymentSchedule),
+      dpdHours: dpdHoursFromSchedule(raw.repaymentSchedule, new Date()),
     };
   }, { countFailure: isNetworkFailure });
 }
