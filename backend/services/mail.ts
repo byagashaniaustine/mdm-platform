@@ -218,8 +218,13 @@ export function loanDisbursementNoticeMail(opts: {
   firstInstallmentDueOn: string | null; // YYYY-MM-DD
   finalDueOn: string | null;            // YYYY-MM-DD
   loanId: string;
+  // When present, the borrower pays with this ML… reference at any bank — the
+  // webhook then matches cleanly on customerReference. When null (upstream
+  // Malipopay create failed), the email falls back to the walk-up instructions
+  // using iStore's merchant identifier 863260 / 99940863260.
+  malipoReference: string | null;
 }): Mail {
-  const { to, userName, enterpriseName, productName, principal, currency, firstInstallmentAmount, firstInstallmentDueOn, finalDueOn, loanId } = opts;
+  const { to, userName, enterpriseName, productName, principal, currency, firstInstallmentAmount, firstInstallmentDueOn, finalDueOn, loanId, malipoReference } = opts;
   const name = userName?.trim() || "there";
   const fmt = (n: number) => n.toLocaleString("en-US");
   const product = productName ? ` (${productName})` : "";
@@ -227,6 +232,34 @@ export function loanDisbursementNoticeMail(opts: {
     ? `First installment: ${currency} ${fmt(firstInstallmentAmount)} due ${firstInstallmentDueOn}`
     : `First installment: ${currency} ${fmt(firstInstallmentAmount)}`;
   const finalLine = finalDueOn ? `Final due date:    ${finalDueOn}` : "";
+  // Two instruction variants. With an ML ref we point everything at it; without
+  // we fall back to the merchant-level identifiers so the borrower can still
+  // pay — matching on our side becomes heuristic in that case.
+  const payInstructions = malipoReference
+    ? `Pay via Malipopay at any of the channels below using your payment reference:
+
+  Payment reference: ${malipoReference}
+
+  NMB or CRDB
+    SimBanking / Mobile banking / Branch / Wakala
+    Biller: MALIPOPAY, reference ${malipoReference}
+
+  TCB
+    Business number 700500, reference ${malipoReference}
+
+Each payment you make against this reference is reconciled against your loan
+automatically.`
+    : `Pay via Malipopay through any of the channels below. Each payment is reconciled
+against your loan automatically.
+
+  NMB or CRDB
+    SimBanking / Mobile banking / Branch / Wakala
+    Biller:    MALIPOPAY
+    Reference: 863260
+
+  TCB
+    Business number: 700500
+    Reference:       99940863260`;
   return {
     to,
     subject: `Your ${enterpriseName} loan has been disbursed — payment instructions`,
@@ -238,17 +271,7 @@ Your loan${product} of ${currency} ${fmt(principal)} has been disbursed.
 ${firstLine}
 ${finalLine}
 
-Pay via Malipopay through any of the channels below. Each payment is reconciled
-against your loan automatically.
-
-  NMB or CRDB
-    SimBanking / Mobile banking / Branch / Wakala
-    Biller:    MALIPOPAY
-    Reference: 863260
-
-  TCB
-    Business number: 700500
-    Reference:       99940863260
+${payInstructions}
 
 Loan reference: ${loanId}
 

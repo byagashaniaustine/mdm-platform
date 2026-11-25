@@ -1,0 +1,186 @@
+// Malipopay webhook ingress. Public endpoint — authenticated by HMAC-SHA256
+// of the raw request body against the per-webhook signing secret (MALIPOPAY_
+// WEBHOOK_SECRET). Delivery semantics per the Integration Packet (pp. 5-6):
+//   - One POST per event, 30-second timeout, retries NOT guaranteed.
+//   - Return 200 immediately; process asynchronously.
+//   - Dedupe on `reference` (Malipopay's ML…).
+//   - Match on `reference` (Malipopay's) OR `customerReference` (ours, e.g.
+//     "LOAN-<loanId>"). The createCollection flow in services/loans.ts seeds
+//     the latter on disburse so this route can look the loan up O(1).
+//
+// Scope today is read-only reconciliation per the operator's current ask:
+//   - persist every event in `events` for audit,
+//   - stamp loan_links.last_malipo_* fields,
+//   - NO Fineract repayment write-back (held until Harvey confirms).
+// A future PR adds the Fineract POST.
+import { Hono } from "hono";
+import { getConfig } from "../config.ts";
+import { db, run, runMaybe } from "../lib/db.ts";
+import { log } from "../lib/log.ts";
+import { verifyWebhookSignature } from "../services/malipo.ts";
+
+interface MalipoWebhookEvent {
+  event: string;                         // payment.confirmed | payment.failed | …
+  reference: string | null;              // Malipopay's ML…
+  customerReference: string | null;      // ours, e.g. "LOAN-42"
+  amount: number;                        // gross TZS
+  feeAmount: number;
+  netAmount: number;
+  status: string | null;
+  payerAccount: string | null;           // phone / account id as reported by Malipopay
+  raw: Record<string, unknown>;
+}
+
+function parseEvent(body: Record<string, unknown>): MalipoWebhookEvent {
+  // The packet shows `event`, `reference`, `customerReference` at top-level in
+  // narrative, but Malipopay wraps success responses in `{ success, data: {…} }`.
+  // Accept either shape so we're robust to future doc revisions.
+  const data = (body.data && typeof body.data === "object" ? body.data : body) as Record<string, unknown>;
+  const amount = Number(data.amount ?? body.amount ?? 0);
+  const fee = Number(data.feeAmount ?? body.feeAmount ?? 0);
+  const net = data.netAmount != null
+    ? Number(data.netAmount)
+    : (body.netAmount != null ? Number(body.netAmount) : amount - fee);
+  return {
+    event: String(body.event ?? data.event ?? ""),
+    reference: (data.reference as string | null) ?? (body.reference as string | null) ?? null,
+    customerReference: (data.customerReference as string | null) ?? (body.customerReference as string | null) ?? null,
+    amount,
+    feeAmount: fee,
+    netAmount: net,
+    status: (data.status as string | null) ?? (body.status as string | null) ?? null,
+    payerAccount: (data.account as string | null) ?? (data.payerAccount as string | null) ?? null,
+    raw: data,
+  };
+}
+
+// deno-lint-ignore no-explicit-any
+export async function handleMalipoWebhook(c: any) {
+  const cfg = getConfig();
+  const raw = await c.req.text();
+  const sig = c.req.header("X-Malipopay-Signature") ?? c.req.header("x-malipopay-signature") ?? "";
+
+  // Signature check. If MALIPOPAY_WEBHOOK_SECRET isn't configured we refuse to
+  // accept the event rather than silently process unverified payments — same
+  // posture as the Fineract route. This is safer than "accept in dev"; it also
+  // means the endpoint stays dormant until the secret lands.
+  if (!cfg.malipoWebhookSecret) {
+    log("warn", "malipo.webhook_unconfigured");
+    return c.json({ error: { code: "AUTH_REQUIRED", message: "Webhook secret not configured on this server." } }, 503);
+  }
+  const ok = await verifyWebhookSignature(raw, sig);
+  if (!ok) {
+    log("warn", "malipo.webhook_bad_sig", { had_sig: Boolean(sig) });
+    return c.json({ error: { code: "AUTH_REQUIRED", message: "Invalid signature." } }, 401);
+  }
+
+  let body: Record<string, unknown> = {};
+  try { body = JSON.parse(raw); } catch {
+    return c.json({ error: { code: "VALIDATION_FAILED", message: "Body is not JSON." } }, 400);
+  }
+  const evt = parseEvent(body);
+
+  // Dedupe on Malipopay reference — per the packet, retries aren't guaranteed
+  // but neither is single-delivery, so we treat the same (event, reference)
+  // pair as idempotent. If customerReference is present we also stamp it.
+  const dedupeKey = `malipo:${evt.event}:${evt.reference ?? "noref"}`;
+  const existing = await runMaybe<{ id: string }>(
+    db().from("events").select("id").eq("idempotency_key", dedupeKey).maybeSingle(),
+  );
+  if (existing) {
+    log("info", "malipo.webhook_duplicate", { event: evt.event, reference: evt.reference });
+    return c.json({ data: { duplicate: true } });
+  }
+
+  // Resolve loan ownership. Prefer customerReference ("LOAN-<id>") since we
+  // set it on disburse; fall back to looking up by malipo_reference which we
+  // also stamped on loan_links at the same time.
+  let loanId: string | null = null;
+  let enterpriseId: string | null = null;
+  let deviceId: string | null = null;
+  const cr = evt.customerReference ?? "";
+  const loanIdFromCR = /^LOAN-(.+)$/.exec(cr)?.[1] ?? null;
+  if (loanIdFromCR) loanId = loanIdFromCR;
+
+  if (!loanId && evt.reference) {
+    const link = await runMaybe<{ fineract_loan_id: string; enterprise_id: string; device_id: string }>(
+      db().from("loan_links").select("fineract_loan_id, enterprise_id, device_id")
+        .eq("malipo_reference", evt.reference).maybeSingle(),
+    );
+    if (link) {
+      loanId = link.fineract_loan_id;
+      enterpriseId = link.enterprise_id;
+      deviceId = link.device_id;
+    }
+  } else if (loanId) {
+    const link = await runMaybe<{ enterprise_id: string; device_id: string }>(
+      db().from("loan_links").select("enterprise_id, device_id")
+        .eq("fineract_loan_id", loanId).maybeSingle(),
+    );
+    if (link) {
+      enterpriseId = link.enterprise_id;
+      deviceId = link.device_id;
+    }
+  }
+
+  // Persist the raw event. If we couldn't identify the loan we still log it
+  // (enterprise_id is required on events, so for an unmatched event we skip
+  // the DB write and surface the orphan in the response for debugging).
+  if (enterpriseId) {
+    await run(db().from("events").insert({
+      enterprise_id: enterpriseId,
+      category: "announcement",
+      action: `malipo.${evt.event}`,
+      device_id: deviceId,
+      params: {
+        reference: evt.reference,
+        customer_reference: evt.customerReference,
+        amount: evt.amount,
+        fee_amount: evt.feeAmount,
+        net_amount: evt.netAmount,
+        status: evt.status,
+        payer_account: evt.payerAccount,
+        loan_id: loanId,
+      },
+      idempotency_key: dedupeKey,
+      state: "succeeded",
+      completed_at: new Date().toISOString(),
+    }));
+  } else {
+    log("warn", "malipo.webhook_orphan", {
+      event: evt.event,
+      reference: evt.reference,
+      customer_reference: evt.customerReference,
+      amount: evt.amount,
+    });
+    return c.json({ data: { orphan: true, reason: "no loan match" } });
+  }
+
+  // Terminal confirmations stamp the last-seen snapshot on loan_links for the
+  // Loan Tracking UI. No Fineract write-back here — that stays with Harvey's
+  // decision; we only reflect what Malipopay says is true.
+  const isConfirmed = evt.event === "payment.confirmed" && (evt.status === "SUCCESSFUL" || evt.status === "PAID" || evt.status === "PARTIAL");
+  if (isConfirmed && loanId) {
+    await run(db().from("loan_links").update({
+      last_malipo_at: new Date().toISOString(),
+      last_malipo_amount: evt.amount,
+      last_malipo_status: evt.status,
+    }).eq("fineract_loan_id", loanId));
+  }
+
+  log("info", "malipo.webhook_processed", {
+    event: evt.event,
+    reference: evt.reference,
+    customer_reference: evt.customerReference,
+    loan_id: loanId,
+    amount: evt.amount,
+    status: evt.status,
+  });
+  return c.json({ data: { accepted: true, loan_id: loanId } });
+}
+
+export function malipoWebhookRoutes() {
+  const r = new Hono();
+  r.post("/hooks", handleMalipoWebhook);
+  return r;
+}

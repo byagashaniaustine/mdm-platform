@@ -1,14 +1,18 @@
-// Malipopay (core-prod.malipopay.co.tz) read-only client.
+// Malipopay (core-prod.malipopay.co.tz) client.
 //
-// Scope today: the per-loan reconciliation check at loans.ts lifts Malipopay
-// references (ML…) out of Fineract repayment notes and looks each one up here.
-// Outbound collection (USSD push) and webhook ingress are deliberately absent
-// until Harvey confirms direction — see Malipopay Integration Packet, Nov 24.
+// Scope:
+//   - createCollection: on disburse, pre-create one FLEXIBLE push:false
+//     collection per loan targeting iStore's merchant identifier. The returned
+//     ML… reference goes to the borrower via email so the webhook can match
+//     payments to the loan via customerReference.
+//   - getPaymentByReference: used by the per-loan reconciliation check in
+//     loans.ts, called on webhook delivery to fetch the authoritative state.
+//   - listChannels: connectivity probe.
+//   - verifyWebhookSignature: imported by the /api/malipo/hooks route.
 //
 // Auth: `apiToken: <KEY>` on every request. No separate sandbox host — the
 // account itself is sandbox until go-live is approved (TZS 100k/day cap per
-// direction, test recipients only). Webhook signature verification is kept
-// here so a future webhook route can import it without a second copy.
+// direction, test recipients only). See Malipopay Integration Packet, Nov 24.
 
 import { getConfig } from "../config.ts";
 import { withBreaker } from "../lib/circuit.ts";
@@ -113,6 +117,77 @@ function normalize(raw: Record<string, unknown>): MalipoPayment | null {
     createdAt: (data.createdAt as string | null) || (data.created_at as string | null) || null,
     confirmedAt: (data.confirmedAt as string | null) || (data.completedAt as string | null) || null,
     raw: data,
+  };
+}
+
+// iStore's merchant identifiers inside Malipopay, from the Integration Packet
+// page 4 ("Wallet top-ups: identifier 863260 under biller MALIPOPAY (NMB, CRDB)
+// or business number 700500 with reference 99940863260 (TCB)") + Harvey's
+// confirmation 2026-11-24. These are the `account` values we pass when creating
+// customer-initiated bill-pay collections — they are NOT secrets.
+export const ISTORE_ACCOUNT_NMB_CRDB = "863260";
+export const ISTORE_ACCOUNT_TCB = "99940863260";
+
+export interface CreateCollectionInput {
+  reference: string;             // our order/loan id. Reusing it is idempotent.
+  description: string;           // shown on the payment record.
+  amount: number;                // whole TZS; FLEXIBLE allows part payments up to this.
+  account?: string;              // target. Defaults to ISTORE_ACCOUNT_NMB_CRDB.
+  service?: "account" | "merchant" | "mobile" | "tanqr";
+  provider?: string;             // optional; required for `account` direct-charge, not bill-pay.
+  amountType?: "FULL" | "FIXED" | "FLEXIBLE";
+  push?: boolean;                // default false → bank bill-pay ref the customer uses.
+}
+
+export interface CreateCollectionResult {
+  reference: string;             // Malipopay ML… reference the customer will type at the bank.
+  status: string;                // e.g. "PROCESSING" for push=true; "PENDING" for push=false.
+  code: number | null;           // Malipopay result code, e.g. 1109.
+  raw: Record<string, unknown>;  // full response for audit.
+}
+
+/**
+ * Create a Malipopay collection. For our disburse flow we call this with
+ * push:false + FLEXIBLE so one ML reference carries every repayment made
+ * against the loan until the total is reached. The customer types the ML…
+ * ref at NMB/CRDB biller MALIPOPAY (or TCB business 700500); the webhook
+ * then arrives with both `reference` (Malipopay's ML…) and `customerReference`
+ * (what we set here as `input.reference`).
+ *
+ * Returning null is NOT a case — on any failure we throw MALIPO_* so the caller
+ * can decide whether to roll back the disburse (we choose not to; the email
+ * falls back to the merchant-level 863260 instructions).
+ */
+export async function createCollection(input: CreateCollectionInput): Promise<CreateCollectionResult> {
+  const body = {
+    reference: input.reference,
+    description: input.description,
+    amount: input.amount,
+    service: input.service ?? "account",
+    account: input.account ?? ISTORE_ACCOUNT_NMB_CRDB,
+    amountType: input.amountType ?? "FLEXIBLE",
+    push: input.push ?? false,
+    ...(input.provider ? { provider: input.provider } : {}),
+  };
+  const raw = await withBreaker(BREAKER, () =>
+    req<Record<string, unknown>>(`/api/v2/payment/collection`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+    { countFailure: isNetworkFailure },
+  );
+  const data = (raw.data ?? {}) as Record<string, unknown>;
+  const ref = String(data.reference ?? "");
+  if (!ref) {
+    // Malipopay returned 2xx but no reference — treat as upstream contract
+    // violation rather than a successful create.
+    throw appError("MALIPO_BAD_REQUEST", `Malipopay create returned no reference: ${JSON.stringify(raw).slice(0, 200)}`);
+  }
+  return {
+    reference: ref,
+    status: String(data.status ?? "UNKNOWN"),
+    code: raw.code != null ? Number(raw.code) : null,
+    raw,
   };
 }
 

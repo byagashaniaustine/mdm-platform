@@ -14,6 +14,7 @@ import { announcementRoutes } from "./routes/announcements.ts";
 import { eventRoutes, overviewRoutes } from "./routes/events.ts";
 import { alertRoutes, locationRoutes, monitoringRoutes } from "./routes/monitoring.ts";
 import { fineractWebhookRoutes, handleFineractWebhook } from "./routes/fineract.ts";
+import { malipoWebhookRoutes } from "./routes/malipo.ts";
 import { automationRoutes } from "./routes/automation.ts";
 import { applyJobRoutes } from "./routes/apply_jobs.ts";
 import { loanRoutes } from "./routes/loans.ts";
@@ -65,6 +66,7 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   // (see routes/fineract.ts). Rate-limiting still applies.
   app.use("/api/*", async (c, next) => {
     if (c.req.path === "/api/fineract/hooks") return next();
+    if (c.req.path === "/api/malipo/hooks") return next();
     return csrfGuard(c, next);
   }, rateLimit({ name: "api", windowMs: 60_000, max: 300 }));
   app.use("/api/*", async (c, next) => {
@@ -87,6 +89,7 @@ export function buildApp(opts: { staticRoot?: string } = {}) {
   app.route("/api/alerts", alertRoutes());
   app.route("/api/locations", locationRoutes());
   app.route("/api/fineract", fineractWebhookRoutes());
+  app.route("/api/malipo", malipoWebhookRoutes());
   // Root POST alias for the Fineract webhook: CE 1.15-SNAPSHOT 500s on hook
   // registration when Payload URL has a path, but accepts root+query. See
   // handleFineractWebhook for details.

@@ -28,6 +28,7 @@ import {
   updateLoanExternalId,
 } from "./bridge/fineract.ts";
 import {
+  createCollection,
   extractReferencesFromNote,
   getPaymentByReference,
   type MalipoPayment,
@@ -317,6 +318,12 @@ export async function linkAndDisburse(
  * Send the Malipopay payment-instructions email once per loan. Idempotent on
  * (enterprise_id, idempotency_key = `disburse:<loanId>:email`) so a retry
  * (admin re-clicks Disburse) doesn't double-send.
+ *
+ * Also pre-creates a Malipopay FLEXIBLE push:false collection against iStore's
+ * merchant identifier so every payment the borrower makes is tagged with their
+ * loan via customerReference. Stamps the returned ML ref on loan_links so the
+ * webhook route can look up the loan O(1). If Malipopay create fails, the email
+ * still fires with walk-up fallback instructions (biller MALIPOPAY ref 863260).
  */
 async function fireDisbursementNotice(
   enterpriseId: string,
@@ -351,13 +358,40 @@ async function fireDisbursementNotice(
     db().from("enterprises").select("name").eq("id", enterpriseId).maybeSingle(),
   );
 
+  // Pre-create the Malipopay collection. If this fails (upstream down, bad
+  // key, etc.) we don't roll back the disburse — we fall back to the walk-up
+  // instructions in the email and let ops retry later. Collection amount is
+  // the full outstanding (principal + interest + fees) so FLEXIBLE lets the
+  // borrower make installment-sized partial payments against one ML ref.
+  const collectionAmount = fresh?.totalOutstanding || principal;
+  let malipoRef: string | null = null;
+  if (getConfig().malipoApiKey) {
+    try {
+      const created = await createCollection({
+        reference: `LOAN-${loanId}`,
+        description: `iStore loan ${loanId}${fresh?.productName ? ` — ${fresh.productName}` : ""}`,
+        amount: collectionAmount,
+        amountType: "FLEXIBLE",
+        push: false,
+      });
+      malipoRef = created.reference;
+      await run(db().from("loan_links").update({
+        malipo_reference: malipoRef,
+        malipo_amount: collectionAmount,
+      }).eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId));
+      log("info", "loans.malipo_collection_created", { loan_id: loanId, malipo_ref: malipoRef });
+    } catch (e) {
+      log("warn", "loans.malipo_collection_create_failed", { loan_id: loanId, error: String(e) });
+    }
+  }
+
   const inserted = await runMaybe<{ id: string }>(
     db().from("events").insert({
       enterprise_id: enterpriseId,
       category: "announcement",
       action: "disburse_notice.email",
       device_id: deviceId,
-      params: { loan_id: loanId, to: toEmail },
+      params: { loan_id: loanId, to: toEmail, malipo_ref: malipoRef },
       idempotency_key: emailKey,
       state: "sent",
     }).select("id").maybeSingle(),
@@ -376,6 +410,7 @@ async function fireDisbursementNotice(
       firstInstallmentDueOn: fresh?.dueOn ?? null,
       finalDueOn: fresh?.finalDueOn ?? null,
       loanId,
+      malipoReference: malipoRef,
     }));
     await run(db().from("events").update({
       state: "succeeded",
