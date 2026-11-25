@@ -6,7 +6,8 @@
 // truth for device inventory. The `loan_links` row written here is what the
 // DISBURSE webhook later finds, skipping the fragile externalId auto-link
 // path (see automation.ts § auto_link_no_device).
-import { db, run } from "../lib/db.ts";
+import { db, run, runMaybe } from "../lib/db.ts";
+import { loanDisbursementNoticeMail, sendMail } from "./mail.ts";
 import { appError, fail } from "../lib/errors.ts";
 import { log } from "../lib/log.ts";
 import {
@@ -299,7 +300,96 @@ export async function linkAndDisburse(
     .delete()
     .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId);
 
+  // Step 5: disbursement-day notice to the borrower. Fail soft — a dropped
+  // email must not roll back the disbursal. Reads the post-disburse schedule
+  // directly from Fineract so the first installment / final due reflect what
+  // Fineract actually generated after the disburse call.
+  await fireDisbursementNotice(enterpriseId, loanId, deviceId,
+    draftEmail ?? loan.clientEmail ?? null,
+    loan.clientName ?? draftName ?? null,
+    principal,
+  ).catch((e) => log("warn", "loans.disbursement_notice_failed", { loan_id: loanId, error: String(e) }));
+
   return { loanId, deviceId, externalId: externalId!, disbursedOn: today };
+}
+
+/**
+ * Send the Malipopay payment-instructions email once per loan. Idempotent on
+ * (enterprise_id, idempotency_key = `disburse:<loanId>:email`) so a retry
+ * (admin re-clicks Disburse) doesn't double-send.
+ */
+async function fireDisbursementNotice(
+  enterpriseId: string,
+  loanId: string,
+  deviceId: string,
+  toEmail: string | null,
+  toName: string | null,
+  principal: number,
+): Promise<void> {
+  if (!toEmail) {
+    log("info", "loans.disbursement_notice_no_email", { loan_id: loanId });
+    return;
+  }
+  const emailKey = `disburse:${loanId}:email`;
+  const existing = await runMaybe<{ id: string }>(
+    db().from("events").select("id")
+      .eq("enterprise_id", enterpriseId).eq("idempotency_key", emailKey).maybeSingle(),
+  );
+  if (existing) return;
+
+  // Fresh read for the post-disburse schedule. If Fineract is briefly
+  // unavailable we still send the email with best-effort values so the
+  // borrower gets the payment-instruction block regardless.
+  let fresh: FineractLoanSummary | null = null;
+  try {
+    fresh = await getLoan(loanId, todayDarISO());
+  } catch (e) {
+    log("warn", "loans.disbursement_notice_fineract_read_failed", { loan_id: loanId, error: String(e) });
+  }
+
+  const enterprise = await runMaybe<{ name: string }>(
+    db().from("enterprises").select("name").eq("id", enterpriseId).maybeSingle(),
+  );
+
+  const inserted = await runMaybe<{ id: string }>(
+    db().from("events").insert({
+      enterprise_id: enterpriseId,
+      category: "announcement",
+      action: "disburse_notice.email",
+      device_id: deviceId,
+      params: { loan_id: loanId, to: toEmail },
+      idempotency_key: emailKey,
+      state: "sent",
+    }).select("id").maybeSingle(),
+  );
+  if (!inserted) return;   // concurrent fire won — skip.
+
+  try {
+    await sendMail(loanDisbursementNoticeMail({
+      to: toEmail,
+      userName: toName,
+      enterpriseName: enterprise?.name ?? "Your lender",
+      productName: fresh?.productName ?? null,
+      principal: fresh?.principalDisbursed || principal,
+      currency: "TZS",
+      firstInstallmentAmount: fresh?.nextInstallmentAmount ?? 0,
+      firstInstallmentDueOn: fresh?.dueOn ?? null,
+      finalDueOn: fresh?.finalDueOn ?? null,
+      loanId,
+    }));
+    await run(db().from("events").update({
+      state: "succeeded",
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+  } catch (e) {
+    const err = e as { message?: string };
+    await run(db().from("events").update({
+      state: "failed",
+      error_message: (err.message ?? String(e)).slice(0, 500),
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+    throw e;
+  }
 }
 
 // -------------------------------------------------- Platform-initiated create

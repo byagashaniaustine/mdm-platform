@@ -198,6 +198,64 @@ ${sign}`,
   };
 }
 
+/**
+ * Loan-disbursal notice. Fired once, inline on linkAndDisburse, after Fineract
+ * confirms the disburse. Gives the borrower the loan summary, first installment,
+ * and Malipopay payment instructions pointing at the two merchant control
+ * numbers Harvey confirmed for iStore:
+ *   - NMB / CRDB → biller MALIPOPAY, reference 863260
+ *   - TCB        → business number 700500, reference 99940863260
+ * SMS version follows later; this is email only for now.
+ */
+export function loanDisbursementNoticeMail(opts: {
+  to: string;
+  userName: string | null;
+  enterpriseName: string;
+  productName: string | null;
+  principal: number;
+  currency: string;                     // e.g. "TZS"
+  firstInstallmentAmount: number;
+  firstInstallmentDueOn: string | null; // YYYY-MM-DD
+  finalDueOn: string | null;            // YYYY-MM-DD
+  loanId: string;
+}): Mail {
+  const { to, userName, enterpriseName, productName, principal, currency, firstInstallmentAmount, firstInstallmentDueOn, finalDueOn, loanId } = opts;
+  const name = userName?.trim() || "there";
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  const product = productName ? ` (${productName})` : "";
+  const firstLine = firstInstallmentDueOn
+    ? `First installment: ${currency} ${fmt(firstInstallmentAmount)} due ${firstInstallmentDueOn}`
+    : `First installment: ${currency} ${fmt(firstInstallmentAmount)}`;
+  const finalLine = finalDueOn ? `Final due date:    ${finalDueOn}` : "";
+  return {
+    to,
+    subject: `Your ${enterpriseName} loan has been disbursed — payment instructions`,
+    text:
+`Hi ${name},
+
+Your loan${product} of ${currency} ${fmt(principal)} has been disbursed.
+
+${firstLine}
+${finalLine}
+
+Pay via Malipopay through any of the channels below. Each payment is reconciled
+against your loan automatically.
+
+  NMB or CRDB
+    SimBanking / Mobile banking / Branch / Wakala
+    Biller:    MALIPOPAY
+    Reference: 863260
+
+  TCB
+    Business number: 700500
+    Reference:       99940863260
+
+Loan reference: ${loanId}
+
+— ${enterpriseName}`,
+  };
+}
+
 export function inviteMail(opts: {
   to: string;
   link: string;
