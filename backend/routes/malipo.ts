@@ -213,10 +213,13 @@ export async function handleMalipoWebhook(c: any) {
             error: err.code,
             message: err.message?.slice(0, 200),
           });
-          // Flip the event row we already inserted from succeeded → failed so
-          // ops can see which webhooks didn't make it into Fineract.
+          // Flip the event row from succeeded → failed with a 2-min backoff
+          // so drainMalipoRetries() in the worker picks it up and re-drives
+          // the Fineract POST. attempts=1 records this first try.
           await run(db().from("events").update({
             state: "failed",
+            attempts: 1,
+            next_attempt_at: new Date(Date.now() + 2 * 60_000).toISOString(),
             error_message: `Fineract post failed: ${err.code} ${err.message?.slice(0, 200) ?? ""}`,
           }).eq("idempotency_key", dedupeKey));
         }

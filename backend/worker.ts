@@ -15,6 +15,7 @@ import { pollCommandStatus } from "./services/commands.ts";
 import { syncEnterprise } from "./services/sync.ts";
 import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
 import { drainApplyQueue } from "./services/bridge/apply_queue.ts";
+import { drainMalipoRetries } from "./services/malipo_retries.ts";
 import { drainSimCallbacks } from "./services/sim_callbacks.ts";
 import { drainHotGroupSyncs, purgeExpiredHints } from "./services/group_sync_hints.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
@@ -74,6 +75,17 @@ export async function tick(): Promise<void> {
       if (sim.delivered || sim.failed) log("info", "sim_callback.drained", sim);
     } catch (e) {
       log("warn", "sim_callback.drain_failed", { error: String(e) });
+    }
+
+    // Retry Malipopay webhooks whose Fineract POST failed. Exponential backoff
+    // 2→4→8→16→32→60 min per row, state=dead after max_attempts. Idempotency
+    // via externalId=ML ref — no double-booking risk even if a prior attempt
+    // half-succeeded.
+    try {
+      const retried = await drainMalipoRetries();
+      if (retried.attempted) log("info", "malipo_retry.drained", { ...retried });
+    } catch (e) {
+      log("warn", "malipo_retry.drain_failed", { error: String(e) });
     }
 
     // Reactive hot-group sync (migration 019, PR 5). ME MDM has no outbound
