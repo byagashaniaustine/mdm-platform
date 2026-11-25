@@ -84,14 +84,22 @@ export async function handleMalipoWebhook(c: any) {
 
   // Dedupe on Malipopay reference — per the packet, retries aren't guaranteed
   // but neither is single-delivery, so we treat the same (event, reference)
-  // pair as idempotent. If customerReference is present we also stamp it.
+  // pair as idempotent. Only state=succeeded is a true duplicate; a prior
+  // state=failed means the Fineract POST never landed and the operator
+  // (or Malipopay, if it happens to retry) should be allowed to re-drive it.
   const dedupeKey = `malipo:${evt.event}:${evt.reference ?? "noref"}`;
-  const existing = await runMaybe<{ id: string }>(
-    db().from("events").select("id").eq("idempotency_key", dedupeKey).maybeSingle(),
+  const existing = await runMaybe<{ id: string; state: string }>(
+    db().from("events").select("id, state").eq("idempotency_key", dedupeKey).maybeSingle(),
   );
-  if (existing) {
+  if (existing && (existing.state === "succeeded" || existing.state === "sent")) {
     log("info", "malipo.webhook_duplicate", { event: evt.event, reference: evt.reference });
     return c.json({ data: { duplicate: true } });
+  }
+  if (existing) {
+    // Prior failure — wipe so we can re-attempt. Fineract's externalId dedupe
+    // on the transaction itself still protects against double-booking.
+    await run(db().from("events").delete().eq("id", existing.id));
+    log("info", "malipo.webhook_retry_after_failure", { event: evt.event, reference: evt.reference });
   }
 
   // Resolve loan ownership. Prefer customerReference ("LOAN-<id>") since we

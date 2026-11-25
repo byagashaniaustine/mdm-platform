@@ -315,15 +315,17 @@ export async function linkAndDisburse(
 }
 
 /**
- * Send the Malipopay payment-instructions email once per loan. Idempotent on
- * (enterprise_id, idempotency_key = `disburse:<loanId>:email`) so a retry
- * (admin re-clicks Disburse) doesn't double-send.
+ * Post-disburse side effects. Two independent idempotent tasks with distinct
+ * retry semantics — no coupling between them:
+ *   1. ensureMalipoCollection — ALWAYS runs (doesn't depend on borrower email).
+ *      Idempotent on `malipo_collection:<loanId>`. Skips only if the previous
+ *      attempt succeeded; a prior failure is retried.
+ *   2. sendDisburseEmail — runs only if we have an email on file. Idempotent
+ *      on `disburse:<loanId>:email`. Same retry-on-failure semantics.
  *
- * Also pre-creates a Malipopay FLEXIBLE push:false collection against iStore's
- * merchant identifier so every payment the borrower makes is tagged with their
- * loan via customerReference. Stamps the returned ML ref on loan_links so the
- * webhook route can look up the loan O(1). If Malipopay create fails, the email
- * still fires with walk-up fallback instructions (biller MALIPOPAY ref 863260).
+ * They run in parallel; a failure in either doesn't block the other. The caller
+ * swallows failures so the disburse response is still "success" — mail / collect
+ * retries are a background concern, not a user-facing error.
  */
 async function fireDisbursementNotice(
   enterpriseId: string,
@@ -333,57 +335,125 @@ async function fireDisbursementNotice(
   toName: string | null,
   principal: number,
 ): Promise<void> {
-  if (!toEmail) {
-    log("info", "loans.disbursement_notice_no_email", { loan_id: loanId });
-    return;
-  }
-  const emailKey = `disburse:${loanId}:email`;
-  const existing = await runMaybe<{ id: string }>(
-    db().from("events").select("id")
-      .eq("enterprise_id", enterpriseId).eq("idempotency_key", emailKey).maybeSingle(),
-  );
-  if (existing) return;
-
-  // Fresh read for the post-disburse schedule. If Fineract is briefly
-  // unavailable we still send the email with best-effort values so the
-  // borrower gets the payment-instruction block regardless.
-  let fresh: FineractLoanSummary | null = null;
-  try {
-    fresh = await getLoan(loanId, todayDarISO());
-  } catch (e) {
+  const fresh = await getLoan(loanId, todayDarISO()).catch((e) => {
     log("warn", "loans.disbursement_notice_fineract_read_failed", { loan_id: loanId, error: String(e) });
+    return null as FineractLoanSummary | null;
+  });
+
+  // Fire both tasks in parallel. .allSettled so one failure doesn't shadow
+  // the other — either task's completion is independent of the other's.
+  await Promise.allSettled([
+    ensureMalipoCollection(enterpriseId, loanId, deviceId, principal, fresh),
+    toEmail
+      ? sendDisburseEmail(enterpriseId, loanId, deviceId, toEmail, toName, principal, fresh)
+      : Promise.resolve(log("info", "loans.disbursement_notice_no_email", { loan_id: loanId })),
+  ]);
+}
+
+/**
+ * Only skip when the previous attempt actually succeeded. A prior failure
+ * leaves state='failed' on the row; we delete it and let the caller retry.
+ * This un-sticks a disbursed loan whose first attempt hit an upstream outage.
+ */
+async function alreadySucceeded(enterpriseId: string, idempotencyKey: string): Promise<boolean> {
+  const row = await runMaybe<{ state: string }>(
+    db().from("events").select("state")
+      .eq("enterprise_id", enterpriseId).eq("idempotency_key", idempotencyKey).maybeSingle(),
+  );
+  if (!row) return false;
+  if (row.state === "succeeded" || row.state === "sent") return true;
+  // Prior failure / dead — clear so the retry can claim the slot.
+  await run(db().from("events").delete()
+    .eq("enterprise_id", enterpriseId).eq("idempotency_key", idempotencyKey));
+  return false;
+}
+
+/**
+ * Pre-create (or confirm) a Malipopay FLEXIBLE push:false collection against
+ * iStore's merchant identifier. Idempotency has two layers:
+ *   - Our `events` row with key `malipo_collection:<loanId>` tracks attempts.
+ *   - Malipopay's own idempotency on the `reference` field ("LOAN-<id>") means
+ *     a retried POST returns the EXISTING ML ref rather than creating a dupe.
+ */
+async function ensureMalipoCollection(
+  enterpriseId: string,
+  loanId: string,
+  deviceId: string,
+  principal: number,
+  fresh: FineractLoanSummary | null,
+): Promise<void> {
+  if (!getConfig().malipoApiKey) return;
+  const key = `malipo_collection:${loanId}`;
+  if (await alreadySucceeded(enterpriseId, key)) return;
+
+  const inserted = await runMaybe<{ id: string }>(
+    db().from("events").insert({
+      enterprise_id: enterpriseId,
+      category: "announcement",
+      action: "malipo.collection_create",
+      device_id: deviceId,
+      params: { loan_id: loanId },
+      idempotency_key: key,
+      state: "sent",
+    }).select("id").maybeSingle(),
+  );
+  if (!inserted) return;
+
+  const collectionAmount = fresh?.totalOutstanding || principal;
+  try {
+    const created = await createCollection({
+      reference: `LOAN-${loanId}`,
+      description: `iStore loan ${loanId}${fresh?.productName ? ` — ${fresh.productName}` : ""}`,
+      amount: collectionAmount,
+      amountType: "FLEXIBLE",
+      push: false,
+    });
+    await run(db().from("loan_links").update({
+      malipo_reference: created.reference,
+      malipo_amount: collectionAmount,
+    }).eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId));
+    await run(db().from("events").update({
+      state: "succeeded",
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+    log("info", "loans.malipo_collection_created", { loan_id: loanId, malipo_ref: created.reference });
+  } catch (e) {
+    const err = e as { message?: string };
+    await run(db().from("events").update({
+      state: "failed",
+      error_message: (err.message ?? String(e)).slice(0, 500),
+      completed_at: new Date().toISOString(),
+    }).eq("id", inserted.id));
+    log("warn", "loans.malipo_collection_create_failed", { loan_id: loanId, error: String(e) });
   }
+}
+
+/**
+ * Compose + send the disbursement email. Reads the current ML ref off
+ * loan_links so if ensureMalipoCollection finishes first the borrower gets the
+ * per-loan ref; if not, the mail falls back to walk-up instructions.
+ * Idempotent on `disburse:<loanId>:email`, retry-on-failure via alreadySucceeded.
+ */
+async function sendDisburseEmail(
+  enterpriseId: string,
+  loanId: string,
+  deviceId: string,
+  toEmail: string,
+  toName: string | null,
+  principal: number,
+  fresh: FineractLoanSummary | null,
+): Promise<void> {
+  const emailKey = `disburse:${loanId}:email`;
+  if (await alreadySucceeded(enterpriseId, emailKey)) return;
 
   const enterprise = await runMaybe<{ name: string }>(
     db().from("enterprises").select("name").eq("id", enterpriseId).maybeSingle(),
   );
-
-  // Pre-create the Malipopay collection. If this fails (upstream down, bad
-  // key, etc.) we don't roll back the disburse — we fall back to the walk-up
-  // instructions in the email and let ops retry later. Collection amount is
-  // the full outstanding (principal + interest + fees) so FLEXIBLE lets the
-  // borrower make installment-sized partial payments against one ML ref.
-  const collectionAmount = fresh?.totalOutstanding || principal;
-  let malipoRef: string | null = null;
-  if (getConfig().malipoApiKey) {
-    try {
-      const created = await createCollection({
-        reference: `LOAN-${loanId}`,
-        description: `iStore loan ${loanId}${fresh?.productName ? ` — ${fresh.productName}` : ""}`,
-        amount: collectionAmount,
-        amountType: "FLEXIBLE",
-        push: false,
-      });
-      malipoRef = created.reference;
-      await run(db().from("loan_links").update({
-        malipo_reference: malipoRef,
-        malipo_amount: collectionAmount,
-      }).eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId));
-      log("info", "loans.malipo_collection_created", { loan_id: loanId, malipo_ref: malipoRef });
-    } catch (e) {
-      log("warn", "loans.malipo_collection_create_failed", { loan_id: loanId, error: String(e) });
-    }
-  }
+  const link = await runMaybe<{ malipo_reference: string | null }>(
+    db().from("loan_links").select("malipo_reference")
+      .eq("enterprise_id", enterpriseId).eq("fineract_loan_id", loanId).maybeSingle(),
+  );
+  const malipoRef = link?.malipo_reference ?? null;
 
   const inserted = await runMaybe<{ id: string }>(
     db().from("events").insert({
@@ -396,7 +466,7 @@ async function fireDisbursementNotice(
       state: "sent",
     }).select("id").maybeSingle(),
   );
-  if (!inserted) return;   // concurrent fire won — skip.
+  if (!inserted) return;
 
   try {
     await sendMail(loanDisbursementNoticeMail({
@@ -423,7 +493,7 @@ async function fireDisbursementNotice(
       error_message: (err.message ?? String(e)).slice(0, 500),
       completed_at: new Date().toISOString(),
     }).eq("id", inserted.id));
-    throw e;
+    log("warn", "loans.disburse_email_failed", { loan_id: loanId, error: String(e) });
   }
 }
 
