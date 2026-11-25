@@ -89,8 +89,13 @@ function pickStatus(raw: unknown): MalipoPayment["status"] {
   return "UNKNOWN";
 }
 
-function normalize(raw: Record<string, unknown>): MalipoPayment {
-  const data = (raw.data ?? raw) as Record<string, unknown>;
+function normalize(raw: Record<string, unknown>): MalipoPayment | null {
+  // Malipopay's envelope is `{ success, code, message, data: {…} | null }`.
+  // A 200 with `data: null` means "no such reference" — we surface as null so
+  // the reconciliation check can flag it as a mismatch (Fineract claims a
+  // payment Malipopay has no record of) instead of producing a bogus row.
+  const data = (raw.data ?? null) as Record<string, unknown> | null;
+  if (!data) return null;
   const amount = Number(data.amount ?? 0);
   const fee = Number(data.feeAmount ?? 0);
   const net = data.netAmount != null ? Number(data.netAmount) : (amount - fee);
@@ -123,6 +128,9 @@ export async function getPaymentByReference(reference: string): Promise<MalipoPa
       req<Record<string, unknown>>(`/api/v1/payment/reference/${encodeURIComponent(reference)}`),
       { countFailure: isNetworkFailure },
     );
+    // normalize returns null for `data: null` (200-with-no-such-ref), which
+    // this layer still exposes as null to the caller. 404 is handled below
+    // in case Malipopay's behavior ever changes.
     return normalize(raw);
   } catch (e) {
     if (toAppError(e).code === "MALIPO_NOT_FOUND") return null;
