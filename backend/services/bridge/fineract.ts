@@ -28,6 +28,12 @@ export interface FineractLoanSummary {
   principalDisbursed: number;       // amount financed (what the customer owes before interest)
   totalRepaid: number;              // principal+interest+fees paid to date; drives the % progress bar
   nextInstallmentAmount: number;    // what's due on dueOn (0 if nothing unpaid)
+  // True once the first non-sentinel period in the repayment schedule is
+  // marked complete (obligationsMetOnDate set OR complete=true). Drives the
+  // initial-payment gate in tiers.ts — the device sits in Due-2D on
+  // disbursement day until the FULL first installment lands (partial payments
+  // don't clear it). Always false for pending/approved (no schedule yet).
+  firstInstallmentPaid: boolean;
 }
 
 interface FineractAuth {
@@ -179,6 +185,23 @@ function nextInstallmentFromSchedule(schedule: unknown): number {
   return 0;
 }
 
+/**
+ * True once the first real installment (period 1 — period 0 is the disbursement
+ * sentinel) is marked complete by Fineract. Used by the tier engine to keep
+ * the device in Due-2D until the full first installment has settled, not just
+ * any partial payment.
+ */
+function firstInstallmentPaidFromSchedule(schedule: unknown): boolean {
+  const periods = (schedule as { periods?: Array<{ complete?: boolean; obligationsMetOnDate?: unknown; totalDueForPeriod?: unknown }> } | undefined)?.periods ?? [];
+  for (const p of periods) {
+    // Skip the disbursement sentinel (period 0, totalDue=0). We want the first
+    // period with a real obligation.
+    if (!(Number(p.totalDueForPeriod ?? 0) > 0)) continue;
+    return Boolean(p.complete) || Boolean(p.obligationsMetOnDate);
+  }
+  return false;
+}
+
 function daysBetween(fromISO: string, toISO: string): number {
   const [fy, fm, fd] = fromISO.split("-").map(Number);
   const [ty, tm, td] = toISO.split("-").map(Number);
@@ -239,6 +262,7 @@ export async function getLoan(loanId: string, todayISO: string): Promise<Finerac
       principalDisbursed: Number(summary.principalDisbursed ?? 0),
       totalRepaid: Number(summary.totalRepayment ?? 0),
       nextInstallmentAmount: nextInstallmentFromSchedule(raw.repaymentSchedule),
+      firstInstallmentPaid: firstInstallmentPaidFromSchedule(raw.repaymentSchedule),
     };
   }, { countFailure: isNetworkFailure });
 }

@@ -24,12 +24,15 @@ export interface LoanState {
   dpd: number;
   // Fineract loan product id — chooses the threshold row.
   productId: number;
-  // Total paid against the loan so far. Used to gate the initial-payment
-  // behavior: product policy says the device sits in Due-2D on disbursement
-  // day until the customer makes *any* payment, even though Fineract reports
-  // 0 due on day 0. Optional so existing callers don't have to supply it;
-  // omit → behave as before (no initial-payment gate).
+  // Total paid against the loan so far. Kept for display / other consumers;
+  // no longer gates the initial-payment tier (firstInstallmentPaid does).
   totalRepaid?: number;
+  // True once the first scheduled installment is paid in full (not partial).
+  // Product policy 2026-11-25: device sits in Due-2D from disbursement day
+  // until the full first installment settles — a TZS 1 drop doesn't flip
+  // it to released. Optional so pre-schedule callers don't have to supply
+  // it; omit → behaves as "unpaid" (safer default).
+  firstInstallmentPaid?: boolean;
 }
 
 // Per-product thresholds. Spec §4.2 defaults; override in future by moving this
@@ -70,12 +73,12 @@ export function tierFor(loan: LoanState, todayISO: string): Tier {
   // Any arrears below k_soft (dpd 1) still signal soft tier — spec §8.
   if (loan.dpd >= 1) return "overdue_2d";
 
-  // Initial-payment gate (product policy, 2026-11-13): until the customer has
-  // paid at least something, the device stays in Due-2D. Fineract reports
-  // 0 due on disbursement day (period 0 is a sentinel) but for this product
-  // the device is expected to prompt for payment immediately. Once any
-  // payment lands, totalRepaid > 0 and we fall through to the T-2 window logic.
-  if (loan.totalRepaid === 0) return "due_2d";
+  // Initial-payment gate (product policy, tightened 2026-11-25): the device
+  // sits in Due-2D on disbursement day and stays there until the FULL first
+  // installment settles — a partial payment no longer clears it (previously
+  // any `totalRepaid > 0` released; that let a TZS 1 trickle move the device
+  // to "released" state with the first installment still open).
+  if (!loan.firstInstallmentPaid) return "due_2d";
 
   // Not yet overdue. Window is T-2, T-1, and T (the due day itself).
   const daysToDue = daysBetween(loan.dueOn, todayISO);
