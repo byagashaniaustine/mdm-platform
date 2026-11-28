@@ -16,6 +16,7 @@ import { syncEnterprise } from "./services/sync.ts";
 import { checkAdminActivity, getSettings, scanAutomation } from "./services/monitoring.ts";
 import { drainApplyQueue } from "./services/bridge/apply_queue.ts";
 import { drainMalipoRetries } from "./services/malipo_retries.ts";
+import { reconcileAllLoans } from "./services/malipo_sync.ts";
 import { drainSimCallbacks } from "./services/sim_callbacks.ts";
 import { drainHotGroupSyncs, purgeExpiredHints } from "./services/group_sync_hints.ts";
 import { scanEnterprise } from "./services/security-scan.ts";
@@ -132,6 +133,19 @@ export async function tick(): Promise<void> {
       );
       for (const c of conns) {
         await syncEnterprise(c.enterprise_id, undefined, null, { quietIfBusy: true });
+      }
+      // Platform sync: Malipopay is source of truth for payments, Fineract is
+      // the ledger. Every sync window we reconcile the two per-loan; any
+      // malipo-ahead drift gets booked to Fineract so the device-tier
+      // pipeline sees the real repayment state without waiting on a
+      // webhook that may never come for partial top-ups.
+      try {
+        const rec = await reconcileAllLoans();
+        if (rec.drift_booked || rec.drift_failed || rec.reverse_drift) {
+          log("info", "malipo_sync.drained", { ...rec });
+        }
+      } catch (e) {
+        log("warn", "malipo_sync.drain_failed", { error: String(e) });
       }
     }
     await monitoringTick(cfg.syncIntervalMinutes);

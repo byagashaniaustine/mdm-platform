@@ -16,6 +16,7 @@ const { backoffMs } = await import("../services/events.ts");
 const { apiBaseFor, normaliseAccountsServer } = await import("../zoho/client.ts");
 const { DEVICE_ACTIONS, DESTRUCTIVE, deviceTag } = await import("../services/commands.ts");
 const { redactParams } = await import("../routes/helpers.ts");
+const { driftOf } = await import("../services/malipo_sync.ts");
 
 Deno.test("restrictions map allow/restrict to the guide's numeric values", () => {
   const p = buildRestrictionsPayload({ allow_factory_reset: "restrict", allow_camera: "restrict", allow_usb_debug: "allow" });
@@ -117,10 +118,14 @@ Deno.test("tierFor: no dueOn yet → disbursed", () => {
 Deno.test("tierFor: DUE_2D window fires at T-2 and T-1, not T-3", () => {
   const t = "2026-10-28";
   // dueOn in 3 days → disbursed; in 2/1/0 days → due_2d (not yet overdue).
-  assert.equal(tierFor({ status: "active", dueOn: "2026-10-31", dpd: 0, productId: 1 }, t), "disbursed");
-  assert.equal(tierFor({ status: "active", dueOn: "2026-10-30", dpd: 0, productId: 1 }, t), "due_2d");
-  assert.equal(tierFor({ status: "active", dueOn: "2026-10-29", dpd: 0, productId: 1 }, t), "due_2d");
-  assert.equal(tierFor({ status: "active", dueOn: "2026-10-28", dpd: 0, productId: 1 }, t), "due_2d");
+  // firstInstallmentPaid=true isolates the pre-due window from the initial-
+  // payment gate added in 8587275 (which also forces due_2d until the first
+  // installment fully settles).
+  const paid = { firstInstallmentPaid: true as const };
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-31", dpd: 0, productId: 1, ...paid }, t), "disbursed");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-30", dpd: 0, productId: 1, ...paid }, t), "due_2d");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-29", dpd: 0, productId: 1, ...paid }, t), "due_2d");
+  assert.equal(tierFor({ status: "active", dueOn: "2026-10-28", dpd: 0, productId: 1, ...paid }, t), "due_2d");
 });
 
 Deno.test("tierFor: truth table across products 1/2/3 for DPD -3 … +20", () => {
@@ -151,7 +156,9 @@ Deno.test("tierFor: truth table across products 1/2/3 for DPD -3 … +20", () =>
       // dpd=0 means "not yet overdue"; shift dueOn n days from today (negative = future).
       // dpd>0 means dueOn was that many days ago.
       const dueOn = dpd === 0 ? offsetDueOn(-n) : offsetDueOn(-dpd);
-      const got = tierFor({ status: "active", dueOn, dpd, productId }, t);
+      // firstInstallmentPaid=true so this table exercises the DPD/pre-due
+      // logic alone, independent of the initial-payment gate.
+      const got = tierFor({ status: "active", dueOn, dpd, productId, firstInstallmentPaid: true }, t);
       assert.equal(got, want, `product=${productId} key=${key} dueOn=${dueOn} dpd=${dpd}: want ${want}, got ${got}`);
     }
   }
@@ -689,4 +696,34 @@ Deno.test("apply_queue module loads and exports the public surface", async () =>
   // The route handler relies on getApplyJob returning null for a bogus id —
   // we can't exercise that without DB; just assert the surface so a rename
   // or signature break is caught at CI rather than first webhook.
+});
+
+Deno.test("driftOf: equal amounts collapse to zero even with float noise", () => {
+  assert.deepEqual(driftOf(5000, 5000), { direction: "equal", delta: 0 });
+  // Rounding ensures 2499.9 ~ 2500.0 doesn't churn a reconcile every tick.
+  assert.deepEqual(driftOf(2499.9, 2500.1), { direction: "equal", delta: 0 });
+  assert.deepEqual(driftOf(0, 0), { direction: "equal", delta: 0 });
+});
+
+Deno.test("driftOf: malipo ahead → book the positive delta", () => {
+  // The actual case that stuck loan 18 locked: Malipopay knew 5000, Fineract had 2500.
+  assert.deepEqual(driftOf(5000, 2500), { direction: "malipo_ahead", delta: 2500 });
+  assert.deepEqual(driftOf(12500, 0), { direction: "malipo_ahead", delta: 12500 });
+  // Tiny drift still fires — Malipopay is source of truth, not a tolerance.
+  assert.deepEqual(driftOf(2501, 2500), { direction: "malipo_ahead", delta: 1 });
+});
+
+Deno.test("driftOf: fineract ahead is logged but never auto-reversed", () => {
+  // A manual Fineract-side entry shouldn't be undone by the sync — we return
+  // the direction so the caller logs; the caller never POSTs in this branch.
+  assert.deepEqual(driftOf(2500, 5000), { direction: "fineract_ahead", delta: 2500 });
+  assert.deepEqual(driftOf(0, 10), { direction: "fineract_ahead", delta: 10 });
+});
+
+Deno.test("driftOf: coerces junk inputs to 0 rather than NaN'ing the comparison", () => {
+  // Malipopay's envelope sometimes returns strings or undefined — never produce
+  // NaN, treat missing data as zero and let the reverse-drift/equal branches do
+  // the right thing.
+  assert.deepEqual(driftOf(Number.NaN as number, 2500), { direction: "fineract_ahead", delta: 2500 });
+  assert.deepEqual(driftOf(5000, Number.NaN as number), { direction: "malipo_ahead", delta: 5000 });
 });
