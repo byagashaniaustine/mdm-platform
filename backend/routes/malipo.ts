@@ -3,22 +3,25 @@
 // WEBHOOK_SECRET). Delivery semantics per the Integration Packet (pp. 5-6):
 //   - One POST per event, 30-second timeout, retries NOT guaranteed.
 //   - Return 200 immediately; process asynchronously.
-//   - Dedupe on `reference` (Malipopay's ML…).
+//   - Dedupe by the raw body's SHA-256 (the packet says "dedupe on reference"
+//     but that silently drops every PARTIAL after the first on a FLEXIBLE
+//     collection — see dedupeKeyForWebhook for the details).
 //   - Match on `reference` (Malipopay's) OR `customerReference` (ours, e.g.
 //     "LOAN-<loanId>"). The createCollection flow in services/loans.ts seeds
 //     the latter on disburse so this route can look the loan up O(1).
 //
-// Scope today is read-only reconciliation per the operator's current ask:
+// Scope today:
 //   - persist every event in `events` for audit,
-//   - stamp loan_links.last_malipo_* fields,
-//   - NO Fineract repayment write-back (held until Harvey confirms).
-// A future PR adds the Fineract POST.
+//   - trigger an immediate reconcileLoan() for payment.confirmed events so the
+//     device-tier pipeline sees the truth without waiting a full sync window.
+// reconcileLoan() is the sole writer to Fineract and the only place that
+// stamps loan_links.last_malipo_* — the webhook no longer does either, so
+// the webhook and the periodic tick can't race to double-book a repayment.
 import { Hono } from "hono";
 import { getConfig } from "../config.ts";
 import { db, run, runMaybe } from "../lib/db.ts";
-import { toAppError } from "../lib/errors.ts";
 import { log } from "../lib/log.ts";
-import { formatFineractDate, postRepayment } from "../services/bridge/fineract.ts";
+import { reconcileLoan } from "../services/malipo_sync.ts";
 import { verifyWebhookSignature } from "../services/malipo.ts";
 
 interface MalipoWebhookEvent {
@@ -56,6 +59,30 @@ function parseEvent(body: Record<string, unknown>): MalipoWebhookEvent {
   };
 }
 
+/**
+ * Idempotency key for the events row, derived from the exact bytes Malipopay
+ * sent us. Why body hash and not `(event, reference)`:
+ *
+ *   - FLEXIBLE collections keep one ML reference open until the total is met;
+ *     every partial top-up fires its own payment.confirmed. Dedupe by ref
+ *     would discard every top-up after the first (observed on loan 18 on
+ *     2026-11-28: second partial of TZS 2,500 arrived at Malipopay but the
+ *     DB had no second event row).
+ *   - A byte-identical retry (Malipopay re-delivering the same event) hashes
+ *     to the same key and correctly collapses.
+ *   - Two distinct partials differ in netAmount / timestamp / sub-tx id, so
+ *     their bodies differ, so their hashes differ, so both insert.
+ *   - The raw bytes have already cleared HMAC verification above, so a
+ *     tampered body can't poison the key.
+ *
+ * Deterministic and pure so unit tests can pin it.
+ */
+export async function dedupeKeyForWebhook(rawBody: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
+  const hex = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `malipo:evt:${hex}`;
+}
+
 // deno-lint-ignore no-explicit-any
 export async function handleMalipoWebhook(c: any) {
   const cfg = getConfig();
@@ -82,24 +109,29 @@ export async function handleMalipoWebhook(c: any) {
   }
   const evt = parseEvent(body);
 
-  // Dedupe on Malipopay reference — per the packet, retries aren't guaranteed
-  // but neither is single-delivery, so we treat the same (event, reference)
-  // pair as idempotent. Only state=succeeded is a true duplicate; a prior
-  // state=failed means the Fineract POST never landed and the operator
-  // (or Malipopay, if it happens to retry) should be allowed to re-drive it.
-  const dedupeKey = `malipo:${evt.event}:${evt.reference ?? "noref"}`;
+  // Dedupe on a SHA-256 of the raw request body rather than on
+  // (event, reference) alone. The packet (p.6) prescribes dedupe-by-reference,
+  // but that's wrong for FLEXIBLE collections where every partial top-up
+  // against the same ML reference legitimately produces a fresh
+  // payment.confirmed event — a per-reference key silently swallows every
+  // partial after the first. Hashing the body means: byte-identical retries
+  // (same event delivered twice) collapse to one row, distinct partials
+  // (different netAmount / timestamp / sub-tx id) each insert. The hash
+  // runs against the exact bytes we already verified via HMAC above, so a
+  // tampered body would have been rejected before reaching this point.
+  const dedupeKey = await dedupeKeyForWebhook(raw);
   const existing = await runMaybe<{ id: string; state: string }>(
     db().from("events").select("id, state").eq("idempotency_key", dedupeKey).maybeSingle(),
   );
   if (existing && (existing.state === "succeeded" || existing.state === "sent")) {
-    log("info", "malipo.webhook_duplicate", { event: evt.event, reference: evt.reference });
+    log("info", "malipo.webhook_duplicate", { event: evt.event, reference: evt.reference, amount: evt.amount });
     return c.json({ data: { duplicate: true } });
   }
   if (existing) {
     // Prior failure — wipe so we can re-attempt. Fineract's externalId dedupe
     // on the transaction itself still protects against double-booking.
     await run(db().from("events").delete().eq("id", existing.id));
-    log("info", "malipo.webhook_retry_after_failure", { event: evt.event, reference: evt.reference });
+    log("info", "malipo.webhook_retry_after_failure", { event: evt.event, reference: evt.reference, amount: evt.amount });
   }
 
   // Resolve loan ownership. Prefer customerReference ("LOAN-<id>") since we
@@ -166,64 +198,24 @@ export async function handleMalipoWebhook(c: any) {
     return c.json({ data: { orphan: true, reason: "no loan match" } });
   }
 
-  // Terminal confirmations stamp the last-seen snapshot on loan_links for the
-  // Loan Tracking UI, THEN book the repayment in Fineract so the loan ledger
-  // catches up. The Fineract POST is idempotent via externalId = Malipopay
-  // reference — a retried webhook can't double-book.
+  // Terminal confirmations trigger an immediate per-loan reconcile. The
+  // webhook itself no longer writes to Fineract: the reconciler is the sole
+  // Fineract writer, so its cumulative-based externalId
+  // (`${ref}-cum${paidAmount}`) applies whether we were kicked by a webhook
+  // or by the periodic sync tick — no double-booking possible. loan_links
+  // stamping also moves inside reconcileLoan so it sees Malipopay's
+  // cumulative paidAmount (not this single event's gross).
   const isConfirmed = evt.event === "payment.confirmed" && (evt.status === "SUCCESSFUL" || evt.status === "PAID" || evt.status === "PARTIAL");
-  if (isConfirmed && loanId) {
-    await run(db().from("loan_links").update({
-      last_malipo_at: new Date().toISOString(),
-      last_malipo_amount: evt.amount,
-      last_malipo_status: evt.status,
-    }).eq("fineract_loan_id", loanId));
-
-    // Fineract write-back. Soft-fail: if Fineract rejects, we still 200 to
-    // Malipopay (per packet: retries not guaranteed). Operator sees the
-    // failure in events + loan_links.last_malipo_* without Malipopay
-    // ever re-firing. The reconciliation check at loans.ts:849 surfaces
-    // the drift in the Loan Tracking panel.
-    if (cfg.malipoFineractPaymentTypeId > 0 && evt.reference) {
-      try {
-        const posted = await postRepayment({
-          loanId,
-          amount: evt.amount,
-          dateDMYY: formatFineractDate(new Date()),
-          externalId: evt.reference,     // ML… → Fineract rejects duplicate externalIds
-          paymentTypeId: cfg.malipoFineractPaymentTypeId,
-          note: `Via Malipopay ${evt.reference}${evt.customerReference ? ` (${evt.customerReference})` : ""}`,
-        });
-        log("info", "malipo.repayment_booked", {
-          loan_id: loanId,
-          malipo_ref: evt.reference,
-          fineract_tx_id: posted.transactionId,
-          amount: evt.amount,
-        });
-      } catch (e) {
-        const err = toAppError(e);
-        // Duplicate externalId → repayment already booked (Malipopay retried,
-        // our previous POST succeeded). Treat as success.
-        const looksDuplicate = err.code === "FINERACT_BAD_REQUEST" && /(duplicate|already)/i.test(err.message);
-        if (looksDuplicate) {
-          log("info", "malipo.repayment_duplicate", { loan_id: loanId, malipo_ref: evt.reference });
-        } else {
-          log("warn", "malipo.repayment_post_failed", {
-            loan_id: loanId,
-            malipo_ref: evt.reference,
-            error: err.code,
-            message: err.message?.slice(0, 200),
-          });
-          // Flip the event row from succeeded → failed with a 2-min backoff
-          // so drainMalipoRetries() in the worker picks it up and re-drives
-          // the Fineract POST. attempts=1 records this first try.
-          await run(db().from("events").update({
-            state: "failed",
-            attempts: 1,
-            next_attempt_at: new Date(Date.now() + 2 * 60_000).toISOString(),
-            error_message: `Fineract post failed: ${err.code} ${err.message?.slice(0, 200) ?? ""}`,
-          }).eq("idempotency_key", dedupeKey));
-        }
-      }
+  if (isConfirmed && loanId && evt.reference) {
+    try {
+      const outcome = await reconcileLoan(loanId, evt.reference);
+      log("info", "malipo.webhook_reconciled", {
+        loan_id: loanId, malipo_ref: evt.reference, amount: evt.amount, outcome,
+      });
+    } catch (e) {
+      log("warn", "malipo.webhook_reconcile_failed", {
+        loan_id: loanId, malipo_ref: evt.reference, error: String(e).slice(0, 200),
+      });
     }
   }
 

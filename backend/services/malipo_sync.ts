@@ -60,6 +60,91 @@ interface LinkRow {
   status: string;
 }
 
+export type LoanOutcome =
+  | "equal"
+  | "booked"
+  | "duplicate"
+  | "fineract_ahead"
+  | "malipo_ref_unknown"
+  | "failed"
+  | "skipped_unconfigured";
+
+/**
+ * Reconcile a single loan's Malipopay vs Fineract state. Exported so the
+ * webhook route can trigger an immediate per-loan sync on inbound event
+ * delivery (rather than wait up to SYNC_INTERVAL_MINUTES for the next tick).
+ * Idempotent: multiple concurrent callers converge on the same Fineract
+ * externalId, so Fineract's own dedupe collapses the race to one booking.
+ */
+export async function reconcileLoan(
+  fineractLoanId: string,
+  malipoReference: string,
+): Promise<LoanOutcome> {
+  const cfg = getConfig();
+  if (!cfg.malipoApiKey || cfg.malipoFineractPaymentTypeId <= 0) return "skipped_unconfigured";
+
+  const malipo = await getPaymentByReference(malipoReference);
+  if (!malipo) {
+    log("info", "malipo_sync.ref_unknown", { loan_id: fineractLoanId, malipo_ref: malipoReference });
+    return "malipo_ref_unknown";
+  }
+  const loan = await getLoan(fineractLoanId, new Date().toISOString().slice(0, 10));
+
+  // `paidAmount` is Malipopay's cumulative gross; use the top-level `amount`
+  // as a fallback since it equals the collection total only when fully paid.
+  const malipoPaid = Number((malipo.raw as { paidAmount?: unknown }).paidAmount ?? malipo.amount ?? 0);
+  const malipoUpdatedAt = String((malipo.raw as { updatedAt?: unknown }).updatedAt ?? "") || null;
+
+  await run(db().from("loan_links").update({
+    last_malipo_at: malipoUpdatedAt ?? new Date().toISOString(),
+    last_malipo_amount: malipoPaid,
+    last_malipo_status: malipo.status,
+  }).eq("fineract_loan_id", fineractLoanId));
+
+  const { direction, delta } = driftOf(malipoPaid, loan.totalRepaid);
+  if (direction === "equal") return "equal";
+  if (direction === "fineract_ahead") {
+    log("warn", "malipo_sync.fineract_ahead", {
+      loan_id: fineractLoanId, malipo_ref: malipoReference, delta,
+      malipo_paid: malipoPaid, fineract_repaid: loan.totalRepaid,
+    });
+    return "fineract_ahead";
+  }
+
+  // malipo_ahead → book the delta. externalId encodes the cumulative so that
+  // webhook-driven and tick-driven invocations for the same payment converge
+  // on the same key; Fineract dedupes and we never double-book.
+  const externalId = `${malipoReference}-cum${malipoPaid}`;
+  try {
+    const posted = await postRepayment({
+      loanId: fineractLoanId,
+      amount: delta,
+      dateDMYY: formatFineractDate(new Date()),
+      externalId,
+      paymentTypeId: cfg.malipoFineractPaymentTypeId,
+      note: `Via Malipopay ${malipoReference} [sync Δ=${delta}, cum=${malipoPaid}]`,
+    });
+    log("info", "malipo_sync.drift_booked", {
+      loan_id: fineractLoanId, malipo_ref: malipoReference, delta,
+      malipo_paid: malipoPaid, fineract_repaid_before: loan.totalRepaid,
+      fineract_tx_id: posted.transactionId, external_id: externalId,
+    });
+    return "booked";
+  } catch (e) {
+    const err = toAppError(e);
+    const looksDuplicate = err.code === "FINERACT_BAD_REQUEST" && /(duplicate|already)/i.test(err.message);
+    if (looksDuplicate) {
+      log("info", "malipo_sync.drift_already_booked", { loan_id: fineractLoanId, external_id: externalId });
+      return "duplicate";
+    }
+    log("warn", "malipo_sync.drift_book_failed", {
+      loan_id: fineractLoanId, malipo_ref: malipoReference, delta,
+      external_id: externalId, error: err.code, message: (err.message ?? "").slice(0, 200),
+    });
+    return "failed";
+  }
+}
+
 export async function reconcileAllLoans(): Promise<SyncStats> {
   const stats: SyncStats = {
     checked: 0, drift_booked: 0, drift_dup: 0, drift_failed: 0,
@@ -77,84 +162,23 @@ export async function reconcileAllLoans(): Promise<SyncStats> {
 
   for (const row of rows) {
     stats.checked++;
-    const ref = row.malipo_reference;
-    const loanId = row.fineract_loan_id;
     try {
-      // One Malipopay call + one Fineract call per loan. ~1.5s each worst case;
-      // sequenced to keep the circuit-breaker signal clean (parallel would blur
-      // which side failed).
-      const malipo = await getPaymentByReference(ref);
-      if (!malipo) {
-        stats.skipped++;
-        log("info", "malipo_sync.ref_unknown", { loan_id: loanId, malipo_ref: ref });
-        continue;
-      }
-      const loan = await getLoan(loanId, new Date().toISOString().slice(0, 10));
-
-      // Malipopay reports `paidAmount` as the cumulative gross — that's what
-      // we compare against Fineract's totalRepaid. The webhook path stamps
-      // `last_malipo_amount` with the single-event amount, which drifts from
-      // cumulative on multi-partial loans; we now overwrite it with the
-      // cumulative so the UI shows the right thing.
-      const malipoPaid = Number((malipo.raw as { paidAmount?: unknown }).paidAmount ?? malipo.amount ?? 0);
-      const malipoUpdatedAt = String((malipo.raw as { updatedAt?: unknown }).updatedAt ?? "") || null;
-      const { direction, delta } = driftOf(malipoPaid, loan.totalRepaid);
-
-      await run(db().from("loan_links").update({
-        last_malipo_at: malipoUpdatedAt ?? new Date().toISOString(),
-        last_malipo_amount: malipoPaid,
-        last_malipo_status: malipo.status,
-      }).eq("fineract_loan_id", loanId));
-
-      if (direction === "equal") {
-        stats.up_to_date++;
-        continue;
-      }
-      if (direction === "fineract_ahead") {
-        stats.reverse_drift++;
-        log("warn", "malipo_sync.fineract_ahead", {
-          loan_id: loanId, malipo_ref: ref, delta,
-          malipo_paid: malipoPaid, fineract_repaid: loan.totalRepaid,
-        });
-        continue;
-      }
-
-      // malipo_ahead → book the delta. externalId encodes the cumulative so
-      // concurrent workers converge on the same key (Fineract dedupes) and a
-      // later top-up gets a fresh key.
-      const externalId = `${ref}-cum${malipoPaid}`;
-      try {
-        const posted = await postRepayment({
-          loanId,
-          amount: delta,
-          dateDMYY: formatFineractDate(new Date()),
-          externalId,
-          paymentTypeId: cfg.malipoFineractPaymentTypeId,
-          note: `Via Malipopay ${ref} [sync drift Δ=${delta}, cum=${malipoPaid}]`,
-        });
-        stats.drift_booked++;
-        log("info", "malipo_sync.drift_booked", {
-          loan_id: loanId, malipo_ref: ref, delta,
-          malipo_paid: malipoPaid, fineract_repaid_before: loan.totalRepaid,
-          fineract_tx_id: posted.transactionId, external_id: externalId,
-        });
-      } catch (e) {
-        const err = toAppError(e);
-        const looksDuplicate = err.code === "FINERACT_BAD_REQUEST" && /(duplicate|already)/i.test(err.message);
-        if (looksDuplicate) {
-          stats.drift_dup++;
-          log("info", "malipo_sync.drift_already_booked", { loan_id: loanId, external_id: externalId });
-        } else {
-          stats.drift_failed++;
-          log("warn", "malipo_sync.drift_book_failed", {
-            loan_id: loanId, malipo_ref: ref, delta,
-            external_id: externalId, error: err.code, message: (err.message ?? "").slice(0, 200),
-          });
-        }
+      const outcome = await reconcileLoan(row.fineract_loan_id, row.malipo_reference);
+      switch (outcome) {
+        case "equal":                stats.up_to_date++; break;
+        case "booked":               stats.drift_booked++; break;
+        case "duplicate":            stats.drift_dup++; break;
+        case "fineract_ahead":       stats.reverse_drift++; break;
+        case "failed":               stats.drift_failed++; break;
+        case "malipo_ref_unknown":
+        case "skipped_unconfigured": stats.skipped++; break;
       }
     } catch (e) {
       stats.skipped++;
-      log("warn", "malipo_sync.loan_skipped", { loan_id: loanId, malipo_ref: ref, error: String(e).slice(0, 200) });
+      log("warn", "malipo_sync.loan_skipped", {
+        loan_id: row.fineract_loan_id, malipo_ref: row.malipo_reference,
+        error: String(e).slice(0, 200),
+      });
     }
   }
 

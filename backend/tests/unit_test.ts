@@ -17,6 +17,7 @@ const { apiBaseFor, normaliseAccountsServer } = await import("../zoho/client.ts"
 const { DEVICE_ACTIONS, DESTRUCTIVE, deviceTag } = await import("../services/commands.ts");
 const { redactParams } = await import("../routes/helpers.ts");
 const { driftOf } = await import("../services/malipo_sync.ts");
+const { dedupeKeyForWebhook } = await import("../routes/malipo.ts");
 
 Deno.test("restrictions map allow/restrict to the guide's numeric values", () => {
   const p = buildRestrictionsPayload({ allow_factory_reset: "restrict", allow_camera: "restrict", allow_usb_debug: "allow" });
@@ -726,4 +727,33 @@ Deno.test("driftOf: coerces junk inputs to 0 rather than NaN'ing the comparison"
   // the right thing.
   assert.deepEqual(driftOf(Number.NaN as number, 2500), { direction: "fineract_ahead", delta: 2500 });
   assert.deepEqual(driftOf(5000, Number.NaN as number), { direction: "malipo_ahead", delta: 5000 });
+});
+
+Deno.test("dedupeKeyForWebhook: byte-identical body → identical key (webhook retry)", async () => {
+  const body = JSON.stringify({ event: "payment.confirmed", reference: "ML570792", amount: 2500 });
+  const a = await dedupeKeyForWebhook(body);
+  const b = await dedupeKeyForWebhook(body);
+  assert.equal(a, b);
+  // SHA-256 hex is 64 chars + the "malipo:evt:" prefix.
+  assert.equal(a.length, "malipo:evt:".length + 64);
+});
+
+Deno.test("dedupeKeyForWebhook: two partials on the same ref produce distinct keys", async () => {
+  // The whole point of this fix: ML570792 top-up #1 and top-up #2 share the
+  // reference but differ in amount/timestamp — their bodies differ, so the
+  // hash differs, so the dedupe accepts both instead of dropping the second.
+  const first = JSON.stringify({ event: "payment.confirmed", reference: "ML570792", amount: 2500, netAmount: 2437.5, updatedAt: "2026-11-26T15:23:48Z" });
+  const second = JSON.stringify({ event: "payment.confirmed", reference: "ML570792", amount: 2500, netAmount: 2437.5, updatedAt: "2026-11-28T08:42:17Z" });
+  const kFirst = await dedupeKeyForWebhook(first);
+  const kSecond = await dedupeKeyForWebhook(second);
+  assert.notEqual(kFirst, kSecond);
+});
+
+Deno.test("dedupeKeyForWebhook: whitespace-only body changes still produce distinct keys", async () => {
+  // Reality check that we're hashing raw bytes, not a normalized shape — a
+  // tampered body with extra whitespace gets a different key, which is the
+  // right outcome: the HMAC check upstream would already have rejected it.
+  const a = await dedupeKeyForWebhook('{"event":"payment.confirmed","reference":"ML1"}');
+  const b = await dedupeKeyForWebhook('{"event":"payment.confirmed", "reference":"ML1"}');
+  assert.notEqual(a, b);
 });
